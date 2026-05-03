@@ -391,6 +391,58 @@
             strcasecmp(name, "gngeo_data.zip") == 0);
   }
 
+  /* ── Neo Geo display name lookup ──
+   * Reads /sd/roms/neogeo/gamenames.txt on first call.
+   * Format: one line per game, "shortname=Display Name"
+   * e.g.  mslug=Metal Slug
+   *       kof98=The King of Fighters '98
+   * Cached in memory for the session. */
+  #define NG_MAX_NAMES 256
+  static struct { char shortname[24]; char display[64]; } ng_names[NG_MAX_NAMES];
+  static int ng_names_count = -1; /* -1 = not loaded yet */
+
+  static void ng_load_names(void) {
+    ng_names_count = 0;
+    FILE *f = fopen("/sd/roms/neogeo/gamenames.txt", "r");
+    if (!f) return;
+    char line[128];
+    while (fgets(line, sizeof(line), f) && ng_names_count < NG_MAX_NAMES) {
+      /* Strip trailing newline/CR */
+      char *nl = strchr(line, '\n'); if (nl) *nl = 0;
+      nl = strchr(line, '\r'); if (nl) *nl = 0;
+      char *eq = strchr(line, '=');
+      if (!eq || eq == line) continue;
+      *eq = 0;
+      const char *sn = line;
+      const char *dn = eq + 1;
+      if (strlen(sn) >= sizeof(ng_names[0].shortname)) continue;
+      if (strlen(dn) >= sizeof(ng_names[0].display)) continue;
+      strcpy(ng_names[ng_names_count].shortname, sn);
+      strcpy(ng_names[ng_names_count].display, dn);
+      ng_names_count++;
+    }
+    fclose(f);
+    printf("Loaded %d Neo Geo display names\n", ng_names_count);
+  }
+
+  /* Return display name for a Neo Geo ROM filename, or NULL if not found.
+   * Input: "mslug.zip" → searches for "mslug" → returns "Metal Slug" */
+  static const char *ng_display_name(const char *filename) {
+    if (ng_names_count < 0) ng_load_names();
+    if (ng_names_count == 0) return NULL;
+    /* Strip extension */
+    static char base[24];
+    strncpy(base, filename, sizeof(base) - 1);
+    base[sizeof(base) - 1] = 0;
+    char *dot = strrchr(base, '.');
+    if (dot) *dot = 0;
+    for (int i = 0; i < ng_names_count; i++) {
+      if (strcasecmp(base, ng_names[i].shortname) == 0)
+        return ng_names[i].display;
+    }
+    return NULL;
+  }
+
   bool matches_rom_extension(const char *name, int step) {
     if (name[0] == '.') return false;
     const char *dot = strrchr(name, '.');
@@ -2025,9 +2077,33 @@
             }
           }
 
-          /* Sort alphabetically */
+          /* Sort alphabetically — for Neo Geo, sort by display name */
           if (SORTED_COUNT > 1) {
-            quick_sort(SORTED_FILES, 0, SORTED_COUNT - 1);
+            if (STEP == 17) {
+              /* Ensure name table is loaded */
+              if (ng_names_count < 0) ng_load_names();
+              if (ng_names_count > 0) {
+                /* Insertion sort by display name (ROM lists are small) */
+                for (int i = 1; i < SORTED_COUNT; i++) {
+                  char *key = SORTED_FILES[i];
+                  const char *key_dn = ng_display_name(key);
+                  if (!key_dn) key_dn = key;
+                  int j = i - 1;
+                  while (j >= 0) {
+                    const char *j_dn = ng_display_name(SORTED_FILES[j]);
+                    if (!j_dn) j_dn = SORTED_FILES[j];
+                    if (strcicmp((char*)j_dn, (char*)key_dn) <= 0) break;
+                    SORTED_FILES[j + 1] = SORTED_FILES[j];
+                    j--;
+                  }
+                  SORTED_FILES[j + 1] = key;
+                }
+              } else {
+                quick_sort(SORTED_FILES, 0, SORTED_COUNT - 1);
+              }
+            } else {
+              quick_sort(SORTED_FILES, 0, SORTED_COUNT - 1);
+            }
           }
 
           /* Move last-played ROM to the front if found */
@@ -2142,7 +2218,10 @@
     //printf("\nlimit:%d", limit);
     for(int n = 0; n < limit; n++) {
       //printf("\n%d:%s", n, FILES[n]);
-      draw_text(x+48,y,FILES[n],true,n == 0 ? true : false, false);
+      const char *label = (STEP == 17) ? ng_display_name(FILES[n]) : NULL;
+      bool use_ext = true;
+      if (label) { use_ext = false; } else { label = FILES[n]; }
+      draw_text(x+48,y,(char*)label,use_ext,n == 0 ? true : false, false);
       bool directory = strcmp(&FILES[n][strlen(FILES[n]) - 3], "dir") == 0;
       directory ?
         draw_folder(x,y,n == 0 ? true : false) :
@@ -4600,8 +4679,11 @@
         draw_media(x, y, selected, -1);
       }
 
-      /* Draw filename (without extension) */
-      draw_text(x + 40, y + 6, FILES[n], true, selected, false);
+      /* Draw filename (without extension) — use display name for Neo Geo */
+      const char *label = (STEP == 17) ? ng_display_name(FILES[n]) : NULL;
+      bool use_ext = true;
+      if (label) { use_ext = false; } else { label = FILES[n]; }
+      draw_text(x + 40, y + 6, (char*)label, use_ext, selected, false);
 
       /* Draw star for favorites (non-directory items only) */
       if (!is_dir && STEP >= 3) {
@@ -4676,8 +4758,11 @@
       draw_media(x, y, selected, -1);
     }
 
-    /* Draw filename */
-    draw_text(x + 40, y + 6, FILES[n], true, selected, false);
+    /* Draw filename — use display name for Neo Geo */
+    const char *label = (STEP == 17) ? ng_display_name(FILES[n]) : NULL;
+    bool use_ext = true;
+    if (label) { use_ext = false; } else { label = FILES[n]; }
+    draw_text(x + 40, y + 6, (char*)label, use_ext, selected, false);
 
     /* Draw star for favorites (non-directory items only) */
     if (!is_dir && STEP >= 3) {

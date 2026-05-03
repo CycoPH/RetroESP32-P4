@@ -465,10 +465,14 @@ static __inline__ void draw_fix_char(unsigned char *buf, int start, int end) {
 /* ── Sprite bank pre-fetch: batch-load missing SD banks before rendering ── */
 #ifdef ESP32_PLATFORM
 #include "esp_timer.h"
+#include "perf_counters.h"
 static void prefetch_sprite_banks(void) {
+	int64_t t_prefetch_start = esp_timer_get_time();
 	GFX_CACHE *gcache = &memory.vid.spr_cache;
-	if (!gcache->data || !gcache->sector_map || !gcache->bounce_buf || !gcache->raw_mode)
+	if (!gcache->data || !gcache->sector_map || !gcache->bounce_buf || !gcache->raw_mode) {
+		g_perf.spr_prefetch_us += esp_timer_get_time() - t_prefetch_start;
 		return;
+	}
 
 	Uint8 *vidram = memory.vid.ram;
 	int tile_mask = ~((gcache->slot_size >> 7) - 1);
@@ -535,7 +539,16 @@ static void prefetch_sprite_banks(void) {
 
 			int bank = (tileno & tile_mask) / tiles_per_bank;
 			if (bank >= total_banks) continue;
-			if (gcache->ptr[bank]) continue;  /* already cached */
+			if (gcache->ptr[bank]) {
+				/* Cache hit — bank already loaded */
+				int word2 = bank >> 5;
+				int bit2 = bank & 31;
+				if (!(seen[word2] & (1u << bit2))) {
+					g_perf.spr_hits++;
+					seen[word2] |= (1u << bit2);
+				}
+				continue;
+			}
 
 			int word = bank >> 5;
 			int bit = bank & 31;
@@ -546,7 +559,12 @@ static void prefetch_sprite_banks(void) {
 		}
 	}
 
-	if (nmiss == 0) return;
+	g_perf.spr_misses += nmiss;
+
+	if (nmiss == 0) {
+		g_perf.spr_prefetch_us += esp_timer_get_time() - t_prefetch_start;
+		return;
+	}
 
 	/* Sort missing banks by LBA sector for sequential SD access */
 	for (int i = 1; i < nmiss; i++) {
@@ -584,8 +602,10 @@ static void prefetch_sprite_banks(void) {
 
 			Uint8 *dest = gcache->data + a * gcache->slot_size;
 
+			int64_t t_sd_s = esp_timer_get_time();
 			DRESULT dres = disk_read(gcache->pdrv, gcache->bounce_buf,
 			                         gcache->sector_map[bank], spb);
+			g_perf.spr_sd_us += esp_timer_get_time() - t_sd_s;
 			if (dres == RES_OK) {
 				memcpy(dest, gcache->bounce_buf, gcache->slot_size);
 			} else {
@@ -599,6 +619,7 @@ static void prefetch_sprite_banks(void) {
 		}
 		i += run_len;
 	}
+	g_perf.spr_prefetch_us += esp_timer_get_time() - t_prefetch_start;
 }
 #endif /* ESP32_PLATFORM */
 

@@ -33,6 +33,7 @@
 #include "messages.h"
 #include "profiler.h"
 #include "debug.h"
+#include "perf_counters.h"
 
 #include "timer.h"
 //#include "streams.h"
@@ -55,6 +56,10 @@
 #endif
 #include "menu.h"
 #include "event.h"
+
+#ifdef ESP32_PLATFORM
+perf_counters_t g_perf;
+#endif
 
 int frame;
 int nb_interlace = 16;
@@ -345,6 +350,9 @@ void neogeo_main_loop(void) {
 	fps_last_time = esp_timer_get_time();
 	fps_frame_count = 0;
 	fps_render_count = 0;
+#ifdef ESP32_PLATFORM
+	perf_reset();
+#endif
 
 	//pause_audio(0);
 	while (!neo_emu_done) {
@@ -353,6 +361,39 @@ void neogeo_main_loop(void) {
 		int64_t now = esp_timer_get_time();
 		if (now - fps_last_time >= 1000000) { /* every 1 second */
 			printf("FPS: %d (rendered: %d, skipped: %d)\n", fps_frame_count, fps_render_count, fps_frame_count - fps_render_count);
+#ifdef ESP32_PLATFORM
+			/* Sprite cache stats */
+			uint32_t spr_total = g_perf.spr_hits + g_perf.spr_misses;
+			if (spr_total > 0) {
+				printf("  spr_cache: hits=%u misses=%u (%.1f%%) sd=%lld us prefetch=%lld us\n",
+				       g_perf.spr_hits, g_perf.spr_misses,
+				       100.0f * g_perf.spr_hits / spr_total,
+				       g_perf.spr_sd_us, g_perf.spr_prefetch_us);
+			}
+			/* ADPCM cache stats */
+			uint32_t adpcm_total = g_perf.adpcm_hits + g_perf.adpcm_misses;
+			if (adpcm_total > 0) {
+				printf("  adpcm_cache: hits=%u misses=%u (%.1f%%)\n",
+				       g_perf.adpcm_hits, g_perf.adpcm_misses,
+				       100.0f * g_perf.adpcm_hits / adpcm_total);
+			}
+			/* IPC pool stats */
+			extern uint32_t ipc_pool_used_bytes(void);
+			extern uint32_t ipc_pool_total_bytes(void);
+			if (g_perf.ipc_lookups > 0) {
+				printf("  ipc: lookups=%u compiles=%u (%.1f%%) pool=%uK/%uK flushes=%u\n",
+				       g_perf.ipc_lookups, g_perf.ipc_misses,
+				       g_perf.ipc_lookups > 0 ? 100.0f * (g_perf.ipc_lookups - g_perf.ipc_misses) / g_perf.ipc_lookups : 0.0f,
+				       ipc_pool_used_bytes() / 1024, ipc_pool_total_bytes() / 1024,
+				       g_perf.ipc_flushes);
+			}
+			/* Frame timing extremes */
+			if (g_perf.frame_min_us < 999999) {
+				printf("  frame: min=%lld us, max=%lld us\n",
+				       g_perf.frame_min_us, g_perf.frame_max_us);
+			}
+			perf_reset();
+#endif
 			fps_frame_count = 0;
 			fps_render_count = 0;
 			fps_last_time = now;
@@ -688,8 +729,9 @@ void neogeo_main_loop(void) {
 				update_screen();
 				memory.watchdog++;
 				if (memory.watchdog > 7) {
-                    printf("WATCHDOG RESET\n");
+                    printf("WATCHDOG RESET %d\n", memory.watchdog);
 					cpu_68k_reset();
+					memory.watchdog = 0;
                 }
 				cpu_68k_interrupt(1);
 			} else {
@@ -746,6 +788,15 @@ void neogeo_main_loop(void) {
 		}
 
 		int64_t tz80_end = esp_timer_get_time();
+
+#ifdef ESP32_PLATFORM
+		/* Track per-frame min/max */
+		{
+			int64_t frame_us = tz80_end - t68k_start;
+			if (frame_us > g_perf.frame_max_us) g_perf.frame_max_us = frame_us;
+			if (frame_us < g_perf.frame_min_us) g_perf.frame_min_us = frame_us;
+		}
+#endif
 
 		/* Timing stats every second */
 		{

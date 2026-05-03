@@ -11,6 +11,9 @@
 #include "def68k-iibs.h"
 #include "def68k-proto.h"
 #include "def68k-funcs.h"
+#ifdef ESP32_PLATFORM
+#include "perf_counters.h"
+#endif
 
 int diss68k_gettext(t_ipc * ipc, char *text);
 
@@ -502,7 +505,15 @@ void cpu68k_clearcache(void)
    * No per-entry free() needed — the entire pool is reused. */
   memset(ipclist, 0, sizeof(ipclist));
   ipc_pool_used = 0;
+#ifdef ESP32_PLATFORM
+  g_perf.ipc_flushes++;
+#endif
 }
+
+#ifdef ESP32_PLATFORM
+uint32_t ipc_pool_used_bytes(void) { return ipc_pool_used; }
+uint32_t ipc_pool_total_bytes(void) { return ipc_pool_size; }
+#endif
 
 void cpu68k_reset(void)
 {

@@ -3,6 +3,9 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#ifdef ESP32_PLATFORM
+#include "perf_counters.h"
+#endif
 
 /*
  * ADPCM V-ROM page cache for Neo Geo.
@@ -44,9 +47,15 @@ static inline uint8_t adpcm_cache_read(adpcm_cache_t *c, uint32_t addr) {
 
     if (c->slot_tag[slot] == (int)page_num) {
         /* Cache hit */
+#ifdef ESP32_PLATFORM
+        g_perf.adpcm_hits++;
+#endif
         return c->data[slot * ADPCM_PAGE_SIZE + page_off];
     }
     /* Cache miss — load from SD */
+#ifdef ESP32_PLATFORM
+    g_perf.adpcm_misses++;
+#endif
     return adpcm_cache_miss(c, addr, page_num, slot);
 }
 

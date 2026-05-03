@@ -1470,7 +1470,6 @@ void esp32_init_conf(const char *game_name) {
     conf.sample_rate = 11025;
     conf.sound = 1;
     conf.vsync = 0;
-    conf.raster = 1;
     conf.debug = 0;
     conf.system = SYS_ARCADE;
     conf.country = CTY_USA;
@@ -1479,4 +1478,29 @@ void esp32_init_conf(const char *game_name) {
     conf.sleep_idle = 0;
     conf.screen320 = 0;
     conf.pal = 0;
+
+    /* Per-game raster mode: only enable for games that need mid-frame IRQ2
+     * (road effects, scanline splits). Raster costs ~0.5ms extra per frame
+     * from 264 separate cpu_68k_run calls + scanline draw overhead. */
+    static const char *raster_games[] = {
+        "ridhero",   /* Riding Hero — road raster effects */
+        "lbowling",  /* League Bowling — gutter line effects */
+        "ssideki",   /* Super Sidekicks — field scroll splits */
+        "ssideki2",
+        "ssideki3",
+        "ssideki4",
+        "turfmast",  /* Turf Masters — course raster effects */
+        "ironclad",  /* Iron Clad — parallax scroll splits */
+        NULL
+    };
+    conf.raster = 0;
+    if (game_name) {
+        for (const char **g = raster_games; *g; g++) {
+            if (strcmp(game_name, *g) == 0) {
+                conf.raster = 1;
+                printf("Raster mode ON for %s\n", game_name);
+                break;
+            }
+        }
+    }
 }

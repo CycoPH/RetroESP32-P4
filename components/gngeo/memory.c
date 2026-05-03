@@ -41,8 +41,11 @@ void (*mem68k_store_bksw_long)(Uint32,Uint32);
 #include "esp_heap_caps.h"
 /* ~304KB struct — MUST go in PSRAM */
 __attribute__((section(".ext_ram.bss"))) neo_mem memory;
+/* 68K work RAM in fast internal SRAM — allocated at init */
+Uint8 *neogeo_fast_ram = NULL;
 #else
 neo_mem memory;
+Uint8 *neogeo_fast_ram = NULL;
 #endif
 
 Uint8 *current_pal;
@@ -232,13 +235,13 @@ Uint32 mem68k_fetch_invalid_long(Uint32 addr) {
 Uint8 mem68k_fetch_ram_byte(Uint32 addr) {
     //  printf("mem68k_fetch_ram_byte %x\n",addr);
     addr &= 0xffff;
-    return (READ_BYTE_ROM(memory.ram + addr));
+    return (READ_BYTE_ROM(neogeo_fast_ram + addr));
 }
 
 Uint16 mem68k_fetch_ram_word(Uint32 addr) {
-    //printf("mem68k_fetch_ram_word %08x %04x\n",addr,READ_WORD_RAM(memory.ram + (addr&0xffff)));
+    //printf("mem68k_fetch_ram_word %08x %04x\n",addr,READ_WORD_RAM(neogeo_fast_ram + (addr&0xffff)));
     addr &= 0xffff;
-    return (READ_WORD_ROM(memory.ram + addr));
+    return (READ_WORD_ROM(neogeo_fast_ram + addr));
 }
 
 LONG_FETCH(mem68k_fetch_ram)
@@ -492,14 +495,14 @@ void mem68k_store_invalid_long(Uint32 addr, Uint32 data) {
 /**** RAM ****/
 void mem68k_store_ram_byte(Uint32 addr, Uint8 data) {
     addr &= 0xffff;
-    WRITE_BYTE_ROM(memory.ram + addr,data);
+    WRITE_BYTE_ROM(neogeo_fast_ram + addr,data);
     return;
 }
 
 void mem68k_store_ram_word(Uint32 addr, Uint16 data) {
     //printf("Store rom word %08x %04x\n",addr,data);
     addr &= 0xffff;
-    WRITE_WORD_ROM(memory.ram + addr,data);
+    WRITE_WORD_ROM(neogeo_fast_ram + addr,data);
     return;
 }
 

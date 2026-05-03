@@ -231,7 +231,7 @@ Uint8 *mem68k_memptr_cpu_bk(Uint32 addr)
 Uint8 *mem68k_memptr_ram(Uint32 addr)
 {
     addr &= 0xffff;
-    return (memory.ram + addr);
+    return (neogeo_fast_ram + addr);
 }
 
 
@@ -274,7 +274,13 @@ void cpu_68k_init(void)
     }
     //#endif
 
-    cpu68k_ram = memory.ram;
+    /* neogeo_fast_ram points to same buffer as memory.ram (PSRAM).
+       Internal SRAM allocation not feasible — largest contiguous block is ~31KB,
+       too small for 64KB work RAM. */
+    neogeo_fast_ram = memory.ram;
+    memset(neogeo_fast_ram, 0, 0x10000);
+
+    cpu68k_ram = neogeo_fast_ram;
     cpu68k_rom = memory.rom.cpu_m68k.p;
     if (memory.rom.cpu_m68k.size < 0x100000)
 	cpu68k_romlen = memory.rom.cpu_m68k.size;

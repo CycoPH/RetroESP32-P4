@@ -54,7 +54,7 @@ static __inline__ uint8 fetchbyte(uint32 addr) {
 
     if (adup >=0x100 && adup <=0x10F) { /* RAM */
 	addr&=0xffff;
-	return (*(uint8 *) (memory.ram + addr));
+	return (*(uint8 *) (neogeo_fast_ram + addr));
     }
     if (adup >=0x200 && adup <=0x2ff) { /* banked cpu */
 	addr&=0xfffff;
@@ -75,7 +75,7 @@ static __inline__ uint16 fetchword(uint32 addr) {
 
     if (adup >=0x100 && adup <=0x10F) { /* RAM */
 	addr&=0xffff;
-	return LOCENDIAN16(*(uint16 *) (memory.ram + addr));
+	return LOCENDIAN16(*(uint16 *) (neogeo_fast_ram + addr));
     }
     if (adup >=0x200 && adup <=0x2ff) { /* banked cpu */
 	addr&=0xfffff;
@@ -96,8 +96,8 @@ static __inline__ uint32 fetchlong(uint32 addr) {
 #ifdef ALIGNLONGS
     if (adup >=0x100 && adup <=0x10F) { /* RAM */
 	addr&=0xffff;
-	return (LOCENDIAN16(*(uint16 *) (memory.ram + addr))<< 16) |
-	    LOCENDIAN16(*(uint16 *) (memory.ram + addr + 2));
+	return (LOCENDIAN16(*(uint16 *) (neogeo_fast_ram + addr))<< 16) |
+	    LOCENDIAN16(*(uint16 *) (neogeo_fast_ram + addr + 2));
     }
     if (adup >=0x200 && adup <=0x2ff) { /* banked cpu */
 	addr&=0xfffff;
@@ -117,7 +117,7 @@ static __inline__ uint32 fetchlong(uint32 addr) {
 #else
     if (adup >=0x100 && adup <=0x10F) { /* RAM */
 	addr&=0xffff;
-	return LOCENDIAN32(*(uint32 *) (memory.ram + addr));
+	return LOCENDIAN32(*(uint32 *) (neogeo_fast_ram + addr));
     }
     if (adup >=0x200 && adup <=0x2ff) { /* banked cpu */
 	addr&=0xfffff;

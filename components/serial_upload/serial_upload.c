@@ -24,12 +24,16 @@
 #include "freertos/task.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "odroid_settings.h"
 
 static const char *TAG = "serial_upload";
 static TaskHandle_t s_upload_task = NULL;
 
 #define MAGIC       "PAPU"
 #define MAGIC_LEN   4
+#define LAUNCH_MAGIC "RUNR"
 #define CHUNK_SIZE  4096
 #define MAX_PATH    256
 #define MAX_FILE_SIZE (68 * 1024 * 1024)  /* 68 MB — large enough for Neo Geo sprite caches (up to 64 MB) */
@@ -190,28 +194,124 @@ static void handle_upload(void)
              (unsigned long)written, path);
 }
 
+/* ── Launch handler ───────────────────────────────────────────────────
+ *
+ * Protocol:
+ *   PC → ESP:  "RUNR"               (4-byte magic)
+ *   PC → ESP:  "<rom_path>\n"       (full SD path, e.g. /sd/roms/neogeo/mslug3.zip)
+ *   ESP → PC:  "\x06LAUNCH:<path>\n" (confirm) then reboots into emulator
+ *   ESP → PC:  "\x06ERR:<msg>\n"     (on failure)
+ */
+
+/* Map file extension to OTA slot — mirrors get_ota_slot() in launcher. */
+static int ext_to_ota_slot(const char *ext)
+{
+    struct { const char *e; int slot; } map[] = {
+        {"nes",0}, {"gb",1}, {"gbc",1}, {"sms",2}, {"gg",2}, {"col",2},
+        {"z80",3}, {"sna",3}, {"a26",4}, {"bin",4}, {"a78",5}, {"lnx",6},
+        {"pce",7}, {"xex",8}, {"atr",8}, {"a52",8}, {"smc",10}, {"sfc",10},
+        {"md",11}, {"gen",11}, {"zip",12}, {NULL,0}
+    };
+    for (int i = 0; map[i].e; i++) {
+        if (strcasecmp(ext, map[i].e) == 0) return map[i].slot;
+    }
+    return -1;
+}
+
+static void handle_launch(void)
+{
+    char rom_path[MAX_PATH];
+
+    ESP_LOGI(TAG, "Launch magic received");
+
+    if (read_line(rom_path, sizeof(rom_path), 5000) <= 0) {
+        send_response("ERR:timeout reading rom path\n");
+        return;
+    }
+
+    /* Extract extension */
+    const char *dot = strrchr(rom_path, '.');
+    if (!dot || dot == rom_path) {
+        send_response("ERR:no file extension\n");
+        return;
+    }
+    const char *ext = dot + 1;
+
+    int ota_slot = ext_to_ota_slot(ext);
+    if (ota_slot < 0) {
+        char resp[64];
+        snprintf(resp, sizeof(resp), "ERR:unknown ext '%s'\n", ext);
+        send_response(resp);
+        return;
+    }
+
+    const esp_partition_t *emu_part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP,
+        ESP_PARTITION_SUBTYPE_APP_OTA_MIN + ota_slot,
+        NULL);
+    if (!emu_part) {
+        char resp[64];
+        snprintf(resp, sizeof(resp), "ERR:no partition ota_%d\n", ota_slot);
+        send_response(resp);
+        return;
+    }
+
+    /* Write ROM path to NVS (same keys the launcher uses) */
+    odroid_settings_RomFilePath_set(rom_path);
+    odroid_settings_DataSlot_set(0);
+
+    char resp[MAX_PATH + 32];
+    snprintf(resp, sizeof(resp), "LAUNCH:%s\n", rom_path);
+    send_response(resp);
+
+    ESP_LOGI(TAG, "Launching: '%s' → %s (ota_%d)",
+             rom_path, emu_part->label, ota_slot);
+
+    /* Small delay to let the response flush over USB */
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    esp_ota_set_boot_partition(emu_part);
+    esp_restart();
+    /* Does not return */
+}
+
 /* ── Background task ─────────────────────────────────────────────────── */
 
 static void serial_upload_task(void *arg)
 {
-    ESP_LOGI(TAG, "Listening for upload on USB Serial JTAG...");
+    ESP_LOGI(TAG, "Listening on USB Serial JTAG (upload=PAPU, launch=RUNR)...");
 
-    const uint8_t magic[] = MAGIC;
-    int idx = 0;
+    const uint8_t upload_magic[] = MAGIC;
+    const uint8_t launch_magic[] = LAUNCH_MAGIC;
+    int u_idx = 0, l_idx = 0;
 
     for (;;) {
         uint8_t byte;
         int n = usb_serial_jtag_read_bytes(&byte, 1, pdMS_TO_TICKS(500));
         if (n <= 0) continue;
 
-        if (byte == magic[idx]) {
-            idx++;
-            if (idx == MAGIC_LEN) {
+        /* Match upload magic "PAPU" */
+        if (byte == upload_magic[u_idx]) {
+            u_idx++;
+            if (u_idx == MAGIC_LEN) {
                 handle_upload();
-                idx = 0;
+                u_idx = 0; l_idx = 0;
+                continue;
             }
         } else {
-            idx = (byte == magic[0]) ? 1 : 0;
+            u_idx = (byte == upload_magic[0]) ? 1 : 0;
+        }
+
+        /* Match launch magic "RUNR" */
+        if (byte == launch_magic[l_idx]) {
+            l_idx++;
+            if (l_idx == MAGIC_LEN) {
+                handle_launch();
+                u_idx = 0; l_idx = 0;
+                continue;
+            }
+        } else {
+            l_idx = (byte == launch_magic[0]) ? 1 : 0;
         }
     }
 }

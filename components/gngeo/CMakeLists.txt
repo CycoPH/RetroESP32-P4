@@ -92,6 +92,30 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-shift-count-overflow
 )
 
+# Hot 68K CPU files get -O3 for maximum throughput
+set(GEN68K_HOT_SRCS
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/reg68k.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-0.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-1.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-2.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-3.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-4.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-5.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-6.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-7.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-8.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-9.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-a.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-b.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-c.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-d.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-e.c
+    ${CMAKE_CURRENT_LIST_DIR}/generator68k/cpu68k-f.c
+    ${CMAKE_CURRENT_LIST_DIR}/memory.c
+)
+set_source_files_properties(${GEN68K_HOT_SRCS} PROPERTIES COMPILE_OPTIONS "-O3")
+
 # GnGeo build defines
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     USE_MAMEZ80=1

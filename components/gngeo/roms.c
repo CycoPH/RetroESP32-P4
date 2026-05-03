@@ -2146,19 +2146,26 @@ int dr_load_roms(GAME_ROMS *r, char *rom_path, char *name) {
 						drv->rom[i].dest, drv->rom[i].size, drv->rom[i].crc,
 						drv->rom[i].filename);
 				DEBUG_LOG("From parent %d\n", pi);
-				if (pi && (region != 5 && region != 0 && region != 7)) {
+				if (pi && (region != 5 && region != 0 && region != 7
+						&& region != REGION_AUDIO_DATA_1 && region != REGION_AUDIO_DATA_2)) {
 					gn_set_error_msg("ERROR: File %s not found\n",
 							drv->rom[i].filename);
 					goto error1;
+				}
+				if (pi) {
+					printf("WARN  %-20s region=%d MISSING (non-fatal, zeroed)\n",
+						   drv->rom[i].filename, region);
 				}
 			} else {
 				int region = drv->rom[i].region;
-				if (region != 5 && region != 0 && region != 7) {
+				if (region != 5 && region != 0 && region != 7
+						&& region != REGION_AUDIO_DATA_1 && region != REGION_AUDIO_DATA_2) {
 					gn_set_error_msg("ERROR: File %s not found\n",
 							drv->rom[i].filename);
 					goto error1;
 				}
-
+				printf("WARN  %-20s region=%d MISSING (non-fatal, zeroed)\n",
+					   drv->rom[i].filename, region);
 			}
 		}
 		int64_t file_elapsed_us = esp_timer_get_time() - file_start_us;

@@ -117,6 +117,8 @@ typedef struct neo_mem {
 } neo_mem;
 
 extern neo_mem memory;
+/* 68K work RAM in fast internal SRAM (allocated at init, fallback to memory.ram) */
+extern Uint8 *neogeo_fast_ram;
 
 /* video related */
 //extern int irq2start, irq2control;

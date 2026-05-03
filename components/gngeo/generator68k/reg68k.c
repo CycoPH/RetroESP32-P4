@@ -12,6 +12,9 @@
 #include "cpu68k.h"
 #include "mem68k.h"
 #include "compile.h"
+#ifdef ESP32_PLATFORM
+#include "perf_counters.h"
+#endif
 
 
 /*** global variables ***/
@@ -121,6 +124,9 @@ unsigned int reg68k_external_execute(unsigned int clocks)
       } else {
         index = (pc24 >> 1) & (LEN_IPCLISTTABLE - 1);
         list = ipclist[index];
+#ifdef ESP32_PLATFORM
+        g_perf.ipc_lookups++;
+#endif
         while (list && (list->pc != pc24 || list->bank!=bank)) {
 	    //while (list && (list->pc != pc24)) {
           list = list->next;
@@ -146,6 +152,9 @@ unsigned int reg68k_external_execute(unsigned int clocks)
           list = cpu68k_makeipclist(pc24);
           list->next = ipclist[index];
           ipclist[index] = list;
+#ifdef ESP32_PLATFORM
+          g_perf.ipc_misses++;
+#endif
         }
         ipc = (t_ipc *) (list + 1);
 	//printf("Exe IPC list @ %08x\n", pc24);
