@@ -6,10 +6,12 @@ $ErrorActionPreference = "Stop"
 
 # Ensure ESP-IDF environment is loaded
 $env:IDF_PYTHON_ENV_PATH = "C:\Users\97254\.espressif\python_env\idf5.5_py3.12_env"
+$ErrorActionPreference = "Continue"
 & "C:\Users\97254\esp\v5.5.2\esp-idf\export.ps1" 2>$null
+$ErrorActionPreference = "Stop"
 
 $ROOT = "C:\ESPIDFprojects\RetroESP32_P4"
-$BINS = "$ROOT\firmware\hdmi"
+$BINS = "$ROOT\firmware_hdmi"
 New-Item -ItemType Directory -Path $BINS -Force | Out-Null
 
 # HDMI sdkconfig overlay — merged with per-app sdkconfig.defaults
@@ -41,7 +43,8 @@ $apps = @(
     @{ Name = "pce";        Dir = "apps\pce";       Bin = "pce_app.bin" },
     @{ Name = "atari800";   Dir = "apps\atari800";  Bin = "atari800_app.bin" },
     @{ Name = "snes";       Dir = "apps\snes";      Bin = "snes_app.bin" },
-    @{ Name = "genesis";    Dir = "apps\genesis";   Bin = "genesis_app.bin" }
+    @{ Name = "genesis";    Dir = "apps\genesis";   Bin = "genesis_app.bin" },
+    @{ Name = "neogeo";     Dir = "apps\neogeo";    Bin = "neogeo_app.bin" }
 )
 
 foreach ($app in $apps) {
