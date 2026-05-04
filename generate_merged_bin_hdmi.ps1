@@ -24,6 +24,37 @@ Write-Host "=== RetroESP32-P4 HDMI Merged Binary Generator ===" -ForegroundColor
 Write-Host "Output: $OUT"
 Write-Host ""
 
+# ── Collect latest HDMI builds into firmware_hdmi folder ──
+New-Item -ItemType Directory -Path $BINS -Force | Out-Null
+
+$sources = @(
+    @{ Src = "$ROOT\launcher\build\bootloader\bootloader.bin";       Dst = "bootloader.bin" },
+    @{ Src = "$ROOT\launcher\build\partition_table\partition-table.bin"; Dst = "partition-table.bin" },
+    @{ Src = "$ROOT\launcher\build\ota_data_initial.bin";             Dst = "ota_data_initial.bin" },
+    @{ Src = "$ROOT\launcher\build\launcher.bin";                     Dst = "launcher.bin" },
+    @{ Src = "$ROOT\apps\nes\build\nes_app.bin";                      Dst = "nes_app.bin" },
+    @{ Src = "$ROOT\apps\gb\build\gb_app.bin";                        Dst = "gb_app.bin" },
+    @{ Src = "$ROOT\apps\sms\build\sms_app.bin";                      Dst = "sms_app.bin" },
+    @{ Src = "$ROOT\apps\spectrum\build\spectrum_app.bin";             Dst = "spectrum_app.bin" },
+    @{ Src = "$ROOT\apps\stella\build\stella_app.bin";                 Dst = "stella_app.bin" },
+    @{ Src = "$ROOT\apps\prosystem\build\prosystem_app.bin";           Dst = "prosystem_app.bin" },
+    @{ Src = "$ROOT\apps\handy\build\handy_app.bin";                   Dst = "handy_app.bin" },
+    @{ Src = "$ROOT\apps\pce\build\pce_app.bin";                      Dst = "pce_app.bin" },
+    @{ Src = "$ROOT\apps\atari800\build\atari800_app.bin";             Dst = "atari800_app.bin" },
+    @{ Src = "$ROOT\apps\snes\build\snes_app.bin";                    Dst = "snes_app.bin" },
+    @{ Src = "$ROOT\apps\genesis\build\genesis_app.bin";               Dst = "genesis_app.bin" },
+    @{ Src = "$ROOT\apps\neogeo\build\neogeo_app.bin";                 Dst = "neogeo_app.bin" }
+)
+
+Write-Host "Collecting latest HDMI builds..." -ForegroundColor Cyan
+foreach ($s in $sources) {
+    if (Test-Path $s.Src) {
+        Copy-Item $s.Src (Join-Path $BINS $s.Dst) -Force
+        Write-Host "  Copied $($s.Dst)" -ForegroundColor Gray
+    }
+}
+Write-Host ""
+
 # Build merge_bin argument list
 [System.Collections.ArrayList]$merge_args = @("--chip","esp32p4","merge_bin","--output",$OUT,"--flash_mode","dio","--flash_size","16MB","--flash_freq","80m")
 
