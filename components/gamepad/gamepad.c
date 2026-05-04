@@ -32,6 +32,7 @@ typedef enum {
     GP_FORMAT_PS4,      /* [id=0x01][LX][LY][RX][RY][hat+btn1][btn2][btn3][L2][R2]... */
     GP_FORMAT_PS5,      /* [id=0x01][LX][LY][RX][RY][L2][R2][cnt][hat+btn1][btn2][btn3]... */
     GP_FORMAT_GENERIC,  /* [LX][LY][RX][RY][hat+btn][btn]... or [id][LX][LY]... */
+	GP_FORMAT_DUAL_PSX_ADAPTOR /* [id=0x01][80][80][HatX][HatY][XABY|0][Sel,Start|LX,RX][00] 8 bytes */
 } gp_report_format_t;
 
 /* ========================= Internal State ========================= */
@@ -82,6 +83,16 @@ static uint8_t hat_to_dpad(uint8_t hat)
     return (hat <= 7) ? map[hat] : 0;
 }
 
+static uint8_t data_to_dpad(uint8_t xaxis, uint8_t yaxis)
+{
+	uint8_t hat = 0;
+	if (yaxis < 64) hat |= GAMEPAD_DPAD_UP;
+	else if (yaxis > 192) hat |= GAMEPAD_DPAD_DOWN;
+	if (xaxis < 64) hat |= GAMEPAD_DPAD_LEFT;
+	else if (xaxis > 192) hat |= GAMEPAD_DPAD_RIGHT;
+	return hat;
+}
+
 /* ========================= Format Detection ========================= */
 
 /**
@@ -91,6 +102,22 @@ static uint8_t hat_to_dpad(uint8_t hat)
  */
 static gp_report_format_t detect_format(const uint8_t *data, int len)
 {
+	// Check for specific device signatures:
+	// VID   PID	 Device
+	// 0x054C 0x05C4 Sony DualShock 4 (PS4)
+	// 0x054C 0x0CE6 Sony DualSense (PS5)
+	// 0x0079 0x0006 PC TWIN SHOCK Gamepad/Generic USB Gamepad
+	// 0x0810 0x0001 Dual PSX Adaptor
+
+	// Step 1: Use the VID/PID combo to identify known controllers.
+	if (len == 8 && s_vid == 0x0810 && s_pid == 0x0001) {
+		return GP_FORMAT_DUAL_PSX_ADAPTOR;
+	}
+
+	/* Short report with ID 0x01: likely PS4/PS5 or clone (some clones use same format but generic VID/PID) */
+	/* Longer report with ID 0x01 and PS4-like idle axes: likely PS4 or PS5 (some clones use same format but generic VID/PID) */
+
+
     /* Short report or no report ID → generic */
     if (len < 10 || data[0] != 0x01) {
         return GP_FORMAT_GENERIC;
@@ -267,6 +294,19 @@ static void parse_gamepad_report(const uint8_t *data, int len)
         gs.dpad     = hat_to_dpad(data[8] & 0x0F);
         gs.buttons  = parse_ps_buttons(data[8], data[9], data[10]);
         break;
+
+	case GP_FORMAT_DUAL_PSX_ADAPTOR:
+		/* [0x01][80][80][HatX][HatY][XABY|0][Sel,Start|LX,RX][00] 8 bytes */
+		if (len < 8) break;
+		gs.axis_lx  = (int16_t)data[1] - 128;
+        gs.axis_ly  = (int16_t)data[2] - 128;
+        gs.axis_rx  = (int16_t)data[3] - 128;
+        gs.axis_ry  = (int16_t)data[4] - 128;
+        gs.brake    = 0; 
+        gs.throttle = 0;
+        gs.dpad     = data_to_dpad(data[3], data[4]);
+        gs.buttons  = parse_ps_buttons(data[5], data[6], data[7]);
+		break;
 
     case GP_FORMAT_GENERIC: {
         /*
@@ -452,7 +492,7 @@ static void gamepad_task(void *arg)
         /* Deferred format detection log (avoid logging in USB callback context) */
         if (s_format_log_pending) {
             s_format_log_pending = 0;
-            const char *names[] = {"unknown", "PS3", "PS4", "PS5", "Generic"};
+            const char *names[] = {"unknown", "PS3", "PS4", "PS5", "Generic", "Dual PSX Adaptor"};
             ESP_LOGI(TAG, "Detected report format: %s (len=%d)", names[s_format], s_format_log_len);
         }
 
