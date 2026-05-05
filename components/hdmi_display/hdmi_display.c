@@ -45,7 +45,7 @@ static const mode_timing_t s_modes[] = {
     },
 };
 
-esp_err_t hdmi_display_init(hdmi_mode_t mode, hdmi_display_t *out)
+esp_err_t hdmi_display_init(hdmi_mode_t mode, hdmi_display_t *out, void *i2c_bus_arg)
 {
     if (mode > HDMI_MODE_800x600 || !out) return ESP_ERR_INVALID_ARG;
     const mode_timing_t *t = &s_modes[mode];
@@ -64,17 +64,22 @@ esp_err_t hdmi_display_init(hdmi_mode_t mode, hdmi_display_t *out)
     esp_ldo_channel_config_t ldo_cfg = { .chan_id = 3, .voltage_mv = 2500 };
     ESP_RETURN_ON_ERROR(esp_ldo_acquire_channel(&ldo_cfg, &ldo), TAG, "LDO");
 
-    /* 2. I2C bus */
-    i2c_master_bus_config_t i2c_cfg = {
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .i2c_port = I2C_NUM_0,
-        .scl_io_num = CONFIG_LT8912_I2C_SCL,
-        .sda_io_num = CONFIG_LT8912_I2C_SDA,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
+    /* 2. I2C bus — reuse existing handle or create new one */
     i2c_master_bus_handle_t i2c_bus;
-    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_cfg, &i2c_bus), TAG, "I2C");
+    if (i2c_bus_arg) {
+        i2c_bus = (i2c_master_bus_handle_t)i2c_bus_arg;
+        ESP_LOGI(TAG, "Reusing existing I2C bus for LT8912");
+    } else {
+        i2c_master_bus_config_t i2c_cfg = {
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .i2c_port = I2C_NUM_0,
+            .scl_io_num = CONFIG_LT8912_I2C_SCL,
+            .sda_io_num = CONFIG_LT8912_I2C_SDA,
+            .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
+        };
+        ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_cfg, &i2c_bus), TAG, "I2C");
+    }
 
     /* 3. DSI bus (PHY active, no streaming yet) */
     esp_lcd_dsi_bus_handle_t dsi_bus = NULL;

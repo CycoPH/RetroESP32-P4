@@ -24,6 +24,7 @@ echo.
 echo === Building Launcher (HDMI) ===
 cd /d "%ROOT%\launcher"
 if exist "build" rmdir /s /q "build"
+if exist "sdkconfig" del /q "sdkconfig"
 idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.hdmi.defaults" build
 if errorlevel 1 ( echo FAILED: Launcher HDMI & pause & exit /b 1 )
 copy /y "build\launcher.bin" "%BINS%\launcher.bin"
@@ -64,6 +65,7 @@ echo.
 echo === Building %~1 (HDMI) ===
 cd /d "%ROOT%\%~2"
 if exist "build" rmdir /s /q "build"
+if exist "sdkconfig" del /q "sdkconfig"
 idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;%HDMI_DEFAULTS%" build
 if errorlevel 1 ( echo FAILED: %~1 HDMI & pause & exit /b 1 )
 copy /y "build\%~3" "%BINS%\%~3"

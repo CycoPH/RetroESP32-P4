@@ -26,8 +26,9 @@ typedef struct {
  * After esp_cache_msync(fb, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M),
  * pixels appear on screen at the next refresh.
  *
- * @param mode   Resolution mode
- * @param out    Filled with resolution, fb pointer, etc.
+ * @param mode     Resolution mode
+ * @param out      Filled with resolution, fb pointer, etc.
+ * @param i2c_bus  Existing I2C master bus handle (or NULL to create one)
  * @return ESP_OK on success
  */
-esp_err_t hdmi_display_init(hdmi_mode_t mode, hdmi_display_t *out);
+esp_err_t hdmi_display_init(hdmi_mode_t mode, hdmi_display_t *out, void *i2c_bus);

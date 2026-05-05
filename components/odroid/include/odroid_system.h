@@ -27,6 +27,11 @@ void odroid_system_init(void);
 void odroid_system_application_set(int slot);
 
 /**
+ * @brief Get the shared I2C master bus handle (created during system init).
+ */
+void *odroid_system_get_i2c_bus(void);
+
+/**
  * @brief Enter deep sleep (stub on P4).
  */
 void odroid_system_sleep(void);

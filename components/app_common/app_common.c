@@ -24,7 +24,9 @@
 #include "odroid_sdcard.h"
 #include "odroid_audio.h"
 #include "odroid_input.h"
+#ifndef CONFIG_HDMI_OUTPUT
 #include "gt911_touch.h"
+#endif
 
 static const char *TAG = "app_common";
 
@@ -138,9 +140,24 @@ void app_init(void)
     app_check_safe_boot();
 }
 
-/* ─── Safe-boot: if touch screen is touched, return to launcher ── */
+/* ─── Safe-boot: return to launcher if triggered ─────────────── */
 void app_check_safe_boot(void)
 {
+#ifdef CONFIG_HDMI_OUTPUT
+    /* HDMI: no touch panel — use gamepad button A (hold during boot) */
+    ESP_LOGI(TAG, "Safe-boot check: hold button A to return to launcher...");
+    for (int i = 0; i < 10; i++) {
+        odroid_gamepad_state state = odroid_input_read_raw();
+        if (state.values[ODROID_INPUT_A]) {
+            ESP_LOGW(TAG, "Button A held — safe-boot: returning to launcher!");
+            app_return_to_launcher();
+            /* Does not return */
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGI(TAG, "Safe-boot check passed (button A not held).");
+#else
+    /* LCD: use touch screen */
     ESP_LOGI(TAG, "Safe-boot check: touch screen to return to launcher...");
 
     /* Poll touch screen a few times over ~500ms.
@@ -156,6 +173,7 @@ void app_check_safe_boot(void)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     ESP_LOGI(TAG, "Safe-boot check passed (no touch detected).");
+#endif
 }
 
 /* ─── Read ROM path from NVS ──────────────────────────────────── */

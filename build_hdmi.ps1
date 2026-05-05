@@ -20,8 +20,9 @@ $HDMI_DEFAULTS = "$ROOT\launcher\sdkconfig.hdmi.defaults"
 # ── Build Launcher (HDMI) ──────────────────────────────────────
 Write-Host "`n=== Building Launcher (HDMI) ===" -ForegroundColor Cyan
 Push-Location "$ROOT\launcher"
-# Clean build directory to avoid stale LCD config
+# Clean build directory and sdkconfig to avoid stale LCD config
 if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
+Remove-Item -Force "sdkconfig" -ErrorAction SilentlyContinue
 idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.hdmi.defaults" build
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Launcher HDMI build failed" }
 Copy-Item "build\launcher.bin" "$BINS\launcher.bin" -Force
@@ -52,6 +53,7 @@ foreach ($app in $apps) {
     Push-Location "$ROOT\$($app.Dir)"
     # Clean to avoid stale config
     if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
+    Remove-Item -Force "sdkconfig" -ErrorAction SilentlyContinue
     # Merge the app's own defaults with the HDMI overlay
     $appDefaults = "sdkconfig.defaults"
     if (Test-Path "sdkconfig.defaults") {

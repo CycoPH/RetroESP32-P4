@@ -6,7 +6,9 @@ $ErrorActionPreference = "Stop"
 
 # Ensure ESP-IDF environment is loaded
 $env:IDF_PYTHON_ENV_PATH = "C:\Users\97254\.espressif\python_env\idf5.5_py3.12_env"
+$ErrorActionPreference = "Continue"
 & "C:\Users\97254\esp\v5.5.2\esp-idf\export.ps1" 2>$null
+$ErrorActionPreference = "Stop"
 
 $ROOT = "C:\ESPIDFprojects\RetroESP32_P4"
 $BINS = "$ROOT\firmware"
@@ -15,6 +17,7 @@ New-Item -ItemType Directory -Path $BINS -Force | Out-Null
 # ── Build Launcher ──────────────────────────────────────────────
 Write-Host "`n=== Building Launcher ===" -ForegroundColor Cyan
 Push-Location "$ROOT\launcher"
+Remove-Item -Force "sdkconfig" -ErrorAction SilentlyContinue
 idf.py build
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Launcher build failed" }
 Copy-Item "build\launcher.bin" "$BINS\launcher.bin" -Force
@@ -43,6 +46,7 @@ $apps = @(
 foreach ($app in $apps) {
     Write-Host "`n=== Building $($app.Name) ===" -ForegroundColor Cyan
     Push-Location "$ROOT\$($app.Dir)"
+    Remove-Item -Force "sdkconfig" -ErrorAction SilentlyContinue
     idf.py build
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw "$($app.Name) build failed" }
     Copy-Item "build\$($app.Bin)" "$BINS\$($app.Bin)" -Force

@@ -103,6 +103,12 @@ void odroid_system_init(void)
     ESP_LOGI(TAG, "=== System Init Complete ===");
 }
 
+/* ─── I2C bus accessor ────────────────────────────────────────── */
+void *odroid_system_get_i2c_bus(void)
+{
+    return (void *)s_i2c_handle;
+}
+
 /* ─── OTA Application Switching (stub) ────────────────────────── */
 void odroid_system_application_set(int slot)
 {

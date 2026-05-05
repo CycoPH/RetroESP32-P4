@@ -13,6 +13,7 @@
 
 #ifdef CONFIG_HDMI_OUTPUT
 #include "hdmi_display.h"
+#include "odroid_system.h"
 #include "esp_cache.h"
 #else
 #include "st7701_lcd.h"
@@ -323,7 +324,8 @@ void ili9341_init(void)
 #ifdef CONFIG_HDMI_OUTPUT
     /* HDMI: Initialize the HDMI display (LT8912 via DSI) */
     if (!s_hdmi_initialized) {
-        esp_err_t ret = hdmi_display_init(HDMI_MODE_640x480, &s_hdmi_disp);
+        esp_err_t ret = hdmi_display_init(HDMI_MODE_640x480, &s_hdmi_disp,
+                                          odroid_system_get_i2c_bus());
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "HDMI display init failed (0x%x)", ret);
             return;
