@@ -128,6 +128,10 @@ static TaskHandle_t  audioTaskHandle;
 #define AUD_QUEUE_DEPTH 2
 static int16_t *audio_dma_buf[AUD_QUEUE_DEPTH] = { NULL, NULL };
 
+/* Audio synthesis on Core 1 — sync */
+static volatile int audio_target_clock = 0;
+static SemaphoreHandle_t audio_done_sem = NULL;
+
 /* Frame skip — start conservative, can be tuned */
 static int frameskip  = 2;    /* render 1 of every N frames */
 
@@ -335,6 +339,8 @@ static void genesis_video_task(void *arg)
 }
 
 /* ─── Audio Task (Core 1) ──────────────────────────────────────── */
+/* Runs FM + PSG synthesis AND mixing/submission on Core 1,
+ * freeing ~3.7ms per frame from the Core 0 emulation loop. */
 static void genesis_audio_task(void *arg)
 {
     audioTaskRunning = true;
@@ -344,7 +350,15 @@ static void genesis_audio_task(void *arg)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (genesis_quit_flag) break;
 
-        /* Mix SN76489 + YM2612 into a single stereo-interleaved buffer */
+        /* ── Run audio synthesis on Core 1 ── */
+        int target = audio_target_clock;
+        gwenesis_SN76489_run(target);
+        ym2612_run(target);
+
+        /* Signal that synthesis is done (safe to reset clocks) */
+        xSemaphoreGive(audio_done_sem);
+
+        /* ── Mix SN76489 + YM2612 into a single stereo-interleaved buffer ── */
         int audio_len = sn76489_index > ym2612_index ? sn76489_index : ym2612_index;
         if (audio_len <= 0) continue;
 
@@ -969,6 +983,8 @@ void genesis_run(const char *rom_path)
                             NULL, 5, &videoTaskHandle, 1);
 
     /* ── Create audio task ── */
+    audio_done_sem = xSemaphoreCreateBinary();
+    xSemaphoreGive(audio_done_sem);  /* First frame doesn't wait */
     xTaskCreatePinnedToCore(genesis_audio_task, "gen_audio", 4096,
                             NULL, 6, &audioTaskHandle, 1);
 
@@ -980,6 +996,7 @@ void genesis_run(const char *rom_path)
 
     /* Profiling */
     int64_t prof_cpu_acc = 0, prof_aud_acc = 0, prof_vid_acc = 0;
+    int64_t prof_m68k_acc = 0, prof_z80_acc = 0, prof_sndfm_acc = 0, prof_vdp_acc = 0;
     int prof_cnt = 0, prof_skip = 0;
 
     odroid_gamepad_state gp_prev;
@@ -1034,7 +1051,6 @@ void genesis_run(const char *rom_path)
         gp_prev = gp;
 
         /* ── Run one Genesis frame ── */
-        int64_t t0 = esp_timer_get_time();
 
         bool drawFrame = (frame_counter % frameskip) == 0;
 
@@ -1046,6 +1062,9 @@ void genesis_run(const char *rom_path)
 
         gwenesis_vdp_render_config();
 
+        /* Wait for audio task to finish synthesis before resetting clocks */
+        xSemaphoreTake(audio_done_sem, pdMS_TO_TICKS(20));
+
         /* Reset clocks */
         system_clock = 0;
         zclk = 0;
@@ -1055,23 +1074,33 @@ void genesis_run(const char *rom_path)
         sn76489_clock = 0;
         sn76489_index = 0;
 
+        int64_t t0 = esp_timer_get_time();
+
         scan_line = 0;
+
+        int64_t fr_m68k = 0, fr_z80 = 0, fr_snd = 0, fr_vdp = 0;
 
         while (scan_line < lines_per_frame) {
             system_clock += VDP_CYCLES_PER_LINE;
 
+            int64_t _ta = esp_timer_get_time();
             m68k_run(system_clock);
+            int64_t _tb = esp_timer_get_time();
             z80_run(system_clock);
+            int64_t _tc = esp_timer_get_time();
 
-            /* Audio — line-accurate mode */
-            if (GWENESIS_AUDIO_ACCURATE == 0) {
-                gwenesis_SN76489_run(system_clock);
-                ym2612_run(system_clock);
-            }
+            /* Audio synthesis moved to Core 1 audio task */
+            int64_t _td = _tc;
 
             /* Video */
             if (drawFrame && scan_line < (int)screen_height)
                 gwenesis_vdp_render_line(scan_line);
+            int64_t _te = esp_timer_get_time();
+
+            fr_m68k += (_tb - _ta);
+            fr_z80  += (_tc - _tb);
+            fr_snd  += (_td - _tc);
+            fr_vdp  += (_te - _td);
 
             /* H-interrupt counter */
             if ((scan_line == 0) || (scan_line > (int)screen_height)) {
@@ -1102,14 +1131,13 @@ void genesis_run(const char *rom_path)
             }
         }
 
-        /* Complete audio for cycle-accurate mode */
-        if (GWENESIS_AUDIO_ACCURATE == 1) {
-            gwenesis_SN76489_run(system_clock);
-            ym2612_run(system_clock);
-        }
-
         /* Reset M68K cycle counter for next frame */
         m68k->cycles -= system_clock;
+
+        prof_m68k_acc += fr_m68k;
+        prof_z80_acc  += fr_z80;
+        prof_sndfm_acc += fr_snd;
+        prof_vdp_acc  += fr_vdp;
 
         int64_t t1 = esp_timer_get_time();
 
@@ -1129,7 +1157,8 @@ void genesis_run(const char *rom_path)
 
         int64_t t2 = esp_timer_get_time();
 
-        /* ── Signal audio task ── */
+        /* ── Signal audio task (synthesis + mix + submit on Core 1) ── */
+        audio_target_clock = system_clock;
         xTaskNotifyGive(audioTaskHandle);
 
         int64_t t3 = esp_timer_get_time();
@@ -1165,7 +1194,13 @@ void genesis_run(const char *rom_path)
                    prof_aud_acc / (prof_cnt * 1000.0f),
                    (prof_cpu_acc + prof_vid_acc + prof_aud_acc) / (prof_cnt * 1000.0f),
                    fps);
+            printf("  >> M68K=%.1fms  Z80=%.1fms  FM+PSG=%.1fms  VDP=%.1fms\n",
+                   prof_m68k_acc / (prof_cnt * 1000.0f),
+                   prof_z80_acc / (prof_cnt * 1000.0f),
+                   prof_sndfm_acc / (prof_cnt * 1000.0f),
+                   prof_vdp_acc / (prof_cnt * 1000.0f));
             prof_cpu_acc = prof_vid_acc = prof_aud_acc = 0;
+            prof_m68k_acc = prof_z80_acc = prof_sndfm_acc = prof_vdp_acc = 0;
             prof_cnt = prof_skip = 0;
             frame_no = 0;
             fps_timer = now;
@@ -1193,6 +1228,8 @@ void genesis_run(const char *rom_path)
 
     vQueueDelete(vidQueue);
     vidQueue = NULL;
+
+    if (audio_done_sem) { vSemaphoreDelete(audio_done_sem); audio_done_sem = NULL; }
 
     odroid_audio_terminate();
 
