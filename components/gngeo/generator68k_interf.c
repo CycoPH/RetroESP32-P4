@@ -521,11 +521,6 @@ int cpu_68k_debuger(void (*execstep)(void),void (*dump)(void)) {
 
 void cpu_68k_interrupt(int a)
 {
-    static int irq_count = 0;
-    irq_count++;
-    if (irq_count <= 3) {
-        printf("cpu_68k_interrupt(%d) #%d\n", a, irq_count);
-    }
     reg68k_external_autovector(a);
 }
 

@@ -493,6 +493,7 @@ void mem68k_store_invalid_long(Uint32 addr, Uint32 data) {
 }
 
 /**** RAM ****/
+
 void mem68k_store_ram_byte(Uint32 addr, Uint8 data) {
     addr &= 0xffff;
     WRITE_BYTE_ROM(neogeo_fast_ram + addr,data);

@@ -60,9 +60,10 @@ unsigned int reg68k_external_step(void)
   if (regs.pending && ((regs.sr.sr_int >> 8) & 7) < regs.pending)
       reg68k_internal_autovector(regs.pending);
   
-  if (!(piib = cpu68k_iibtable[fetchword(regs.pc)]))
-      printf("Invalid instruction @ %08X [%04X]\n", (unsigned)regs.pc,
-	     fetchword(regs.pc));
+  if (!(piib = cpu68k_iibtable[fetchword(regs.pc)])) {
+      reg68k_internal_vector(V_ILLEGAL, regs.pc);
+      return 34;
+  }
   
   cpu68k_ipc(regs.pc,
 	     mem68k_memptr[(regs.pc >> 12) & 0xfff] (regs.pc &
@@ -93,11 +94,34 @@ unsigned int reg68k_external_execute(unsigned int clocks)
 
   clks = clocks;
 
-    if (regs.pending && ((regs.sr.sr_int >> 8) & 7) < regs.pending)
-      reg68k_internal_autovector(regs.pending);
-
     do {
+
+      if (regs.pending && ((regs.sr.sr_int >> 8) & 7) < regs.pending)
+        reg68k_internal_autovector(regs.pending);
+
+      /* STOP: consume all remaining clocks instantly */
+      if (regs.stop) {
+        cpu68k_clocks += clks;
+        clks = 0;
+        break;
+      }
+
       pc24 = regs.pc & 0xffffff;
+
+      /* Address error: 68K requires word-aligned instruction fetches */
+      if (pc24 & 1) {
+          /* PC=0xFFFF in user mode: uninitialized task function pointer.
+             Simulate an immediate RTS so the TRAP #5 at 0xB98
+             returns control to the task dispatcher. */
+          if (pc24 == 0x00FFFF && !(regs.sr.sr_int & 0x2000)) {
+              regs.pc = fetchlong(regs.regs[15] & 0xffffff);
+              regs.regs[15] += 4;
+              continue;
+          }
+          reg68k_internal_address_error(pc24, 1);
+          continue;
+      }
+
 //      if ((pc24 & 0xff0000) == 0xff0000) {
       if ((pc24&0xF00000)==0x200000)
 	  bank=bankaddress;
@@ -108,9 +132,12 @@ unsigned int reg68k_external_execute(unsigned int clocks)
         /* executing code from RAM, do not use compiled information */
         do {
           step_piib = cpu68k_iibtable[fetchword(regs.pc)];
-          if (!step_piib)
-	      printf("Invalid instruction (iib assert) @ %08X\n",
-		  (unsigned)regs.pc);
+          if (!step_piib) {
+	      reg68k_internal_vector(V_ILLEGAL, regs.pc);
+	      clks -= 34;
+	      cpu68k_clocks += 34;
+	      break;
+	  }
           cpu68k_ipc(regs.pc,
                      mem68k_memptr[(regs.pc >> 12) &
 				  0xfff] (regs.pc & 0xFFFFFF),
@@ -249,5 +276,31 @@ void reg68k_internal_vector(int vno, uint32 oldpc)
   storeword(regs.regs[15], regs.sr.sr_int);
   regs.pc = fetchlong(vno * 4);
 
+}
+
+/*** reg68k_internal_address_error - group 0 exception with extended frame ***/
+
+void reg68k_internal_address_error(uint32 access_addr, int read_flag)
+{
+  uint16 saved_sr = regs.sr.sr_int;
+  if (!regs.sr.sr_struct.s) {
+    regs.regs[15] ^= regs.sp;
+    regs.sp ^= regs.regs[15];
+    regs.regs[15] ^= regs.sp;
+    regs.sr.sr_struct.s = 1;
+  }
+  /* Group 0 frame: PC, SR, IR, Access Address, Function Code word */
+  regs.regs[15] -= 4;
+  storelong(regs.regs[15], regs.pc);           /* PC */
+  regs.regs[15] -= 2;
+  storeword(regs.regs[15], saved_sr);           /* SR */
+  regs.regs[15] -= 2;
+  storeword(regs.regs[15], fetchword(regs.pc & ~1)); /* Instruction Register */
+  regs.regs[15] -= 4;
+  storelong(regs.regs[15], access_addr);        /* Access Address */
+  regs.regs[15] -= 2;
+  storeword(regs.regs[15], read_flag ? 0x10 : 0x00); /* Function Code + R/W */
+  regs.sr.sr_struct.t = 0;
+  regs.pc = fetchlong(V_ADDRESS * 4);
 }
 

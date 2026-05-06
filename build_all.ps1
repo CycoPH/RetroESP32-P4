@@ -17,6 +17,7 @@ New-Item -ItemType Directory -Path $BINS -Force | Out-Null
 # ── Build Launcher ──────────────────────────────────────────────
 Write-Host "`n=== Building Launcher ===" -ForegroundColor Cyan
 Push-Location "$ROOT\launcher"
+if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
 Remove-Item -Force "sdkconfig" -ErrorAction SilentlyContinue
 idf.py build
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Launcher build failed" }
@@ -46,6 +47,7 @@ $apps = @(
 foreach ($app in $apps) {
     Write-Host "`n=== Building $($app.Name) ===" -ForegroundColor Cyan
     Push-Location "$ROOT\$($app.Dir)"
+    if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
     Remove-Item -Force "sdkconfig" -ErrorAction SilentlyContinue
     idf.py build
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw "$($app.Name) build failed" }

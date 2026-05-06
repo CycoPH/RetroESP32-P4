@@ -22,6 +22,7 @@ REM === Build Launcher ===
 echo.
 echo === Building Launcher (LCD) ===
 cd /d "%ROOT%\launcher"
+if exist "build" rmdir /s /q "build"
 if exist "sdkconfig" del /q "sdkconfig"
 idf.py build
 if errorlevel 1 ( echo FAILED: Launcher & pause & exit /b 1 )
@@ -62,6 +63,7 @@ exit /b 0
 echo.
 echo === Building %~1 (LCD) ===
 cd /d "%ROOT%\%~2"
+if exist "build" rmdir /s /q "build"
 if exist "sdkconfig" del /q "sdkconfig"
 idf.py build
 if errorlevel 1 ( echo FAILED: %~1 & pause & exit /b 1 )

@@ -878,6 +878,7 @@ void draw_screen(void) {
 #endif
 
 	draw_fix_char(buffer->pixels, 0, 0);
+
 	SDL_UnlockSurface(buffer);
 
 	if (conf.do_message) {

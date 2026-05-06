@@ -43,6 +43,7 @@
 #include "neocrypt.h"
 #include "conf.h"
 #include "esp_timer.h"
+
 //#include "driver.h"
 //#include "gui_interf.h"
 #ifdef FULL_GL
@@ -217,7 +218,6 @@ static inline int neo_interrupt(void) {
     static int frames;
 
 	pd4990a_addretrace();
-	// printf("neogeo_frame_counter_speed %d\n",neogeo_frame_counter_speed);
 	if (!(memory.vid.irq2control & 0x8)) {
 		if (fc >= neogeo_frame_counter_speed) {
 			fc = 0;
@@ -234,6 +234,28 @@ static inline int neo_interrupt(void) {
 
 		draw_screen();
 		fps_render_count++;
+
+		/* Count non-black pixels in framebuffer */
+		{
+			static int fb_diag = 0;
+			fb_diag++;
+			if (fb_diag % 120 == 0) {
+				uint16_t *px = (uint16_t*)buffer->pixels;
+				int total = buffer->w * buffer->h;
+				int nonblack = 0;
+				for (int pi = 0; pi < total; pi++) {
+					if (px[pi]) nonblack++;
+				}
+				/* Also count non-zero host palette entries */
+				Uint32 *hpal = current_pc_pal;
+				int hnz = 0;
+				for (int pi = 0; pi < 4096; pi++) {
+					if (hpal[pi]) hnz++;
+				}
+				printf("  FB: %d/%d non-black pixels  HOST_PAL: %d/4096 non-zero  backdrop_host=%08X\n",
+				       nonblack, total, hnz, (unsigned)hpal[4095]);
+			}
+		}
 
 		PROFILER_STOP(PROF_VIDEO);
 	}
@@ -738,6 +760,7 @@ void neogeo_main_loop(void) {
 				PROFILER_START(PROF_68K);
 				int64_t t_cpu_s = esp_timer_get_time();
 				tm_cycle = cpu_68k_run(cpu_68k_timeslice - tm_cycle);
+
 				int64_t t_cpu_e = esp_timer_get_time();
 				PROFILER_STOP(PROF_68K);
 				a = neo_interrupt();

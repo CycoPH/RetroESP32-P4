@@ -11,11 +11,17 @@
 #include "def68k-iibs.h"
 #include "def68k-proto.h"
 #include "def68k-funcs.h"
+#include "reg68k.h"
 #ifdef ESP32_PLATFORM
 #include "perf_counters.h"
 #endif
 
 int diss68k_gettext(t_ipc * ipc, char *text);
+
+/* Handler for illegal/unrecognized 68K instructions — fires vector 4 */
+static void cpu68k_illegal_op(t_ipc *ipc) {
+    reg68k_internal_vector(V_ILLEGAL, regs.pc);
+}
 
 /*** externed variables ***/
 
@@ -454,9 +460,18 @@ t_ipclist *cpu68k_makeipclist(uint32 pc)
 	ipc = ((t_ipc *) (list + 1)) + instrs - 1;
     }
     if (!(iib = cpu68k_iibtable[fetchword(pc)])) {
-	printf("Invalid instruction @ %08X [%04X]", (unsigned)pc,
-	    fetchword(pc));
-	exit(1);
+	/* Illegal instruction — emit exception handler and end block */
+	ipc->opcode = fetchword(pc);
+	ipc->wordlen = 1;
+	ipc->used = 0;
+	ipc->set = 0;
+	ipc->src = 0;
+	ipc->dst = 0;
+	ipc->function = cpu68k_illegal_op;
+	list->clocks += 34;
+	pc += 2;
+	ipc++;
+	break;
     }
     cpu68k_ipc(pc, mem68k_memptr[pc >> 12] (pc), iib, ipc);
     list->clocks += iib->clocks;
@@ -466,7 +481,7 @@ t_ipclist *cpu68k_makeipclist(uint32 pc)
   while (!iib->flags.endblk);
   *(int *)ipc = 0;
 
-  if (instrs == 2) {
+  if (instrs == 2 && iib) {
     ipc--;
     if (iib->mnemonic == i_Bcc && ipc->src == list->pc) {
       /* we have a 2-instruction block ending in a branch to start */
@@ -488,10 +503,12 @@ t_ipclist *cpu68k_makeipclist(uint32 pc)
     ipc->set &= required;
     required &= ~ipc->set;
     required |= ipc->used;
-    if (ipc->set) {
-      ipc->function = cpu68k_functable[(ipc->opcode << 1) + 1];
-    } else {
-      ipc->function = cpu68k_functable[ipc->opcode << 1];
+    {
+      void *fn = ipc->set
+        ? (void *)cpu68k_functable[(ipc->opcode << 1) + 1]
+        : (void *)cpu68k_functable[ipc->opcode << 1];
+      if (fn) ipc->function = fn;
+      /* else: keep existing handler (e.g. illegal instruction) */
     }
     ipc--;
   }
