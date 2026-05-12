@@ -1259,17 +1259,27 @@ void update_p2_key(void) {
     memory.intern_p2 = 0xFF;
 }
 
+void update_coin(void) {
+    int coin_pressed = joy_state[0][GN_SELECT_COIN];
+    Uint8 val = 0x3F;  /* bits 0-5 all high (inactive) for 1-slot MVS */
+    if (coin_pressed) val &= ~(1 << 0); /* COIN 1 */
+    static int coin_trace = 0;
+    if (coin_pressed && coin_trace < 3) {
+        printf("COIN_INSERT: intern_coin=0x%02X\n", val);
+        coin_trace++;
+    }
+    memory.intern_coin = val;
+}
+
 void update_start(void) {
     Uint8 val = 0xFF;  /* All idle: bits 0-3=buttons, bit4-5=memcard prot, bit6=no card, bit7=1 */
     if (joy_state[0][GN_START])       val &= ~(1 << 0); /* P1 START */
+    static int start_trace = 0;
+    if (joy_state[0][GN_START] && start_trace < 3) {
+        printf("START_PRESS: intern_start=0x%02X\n", val);
+        start_trace++;
+    }
     memory.intern_start = val;
-}
-
-void update_coin(void) {
-    int coin_pressed = joy_state[0][GN_SELECT_COIN];
-    Uint8 val = 0x07;
-    if (coin_pressed) val &= ~(1 << 0); /* COIN 1 */
-    memory.intern_coin = val;
 }
 
 /* ──────────────────────────────────────────────────────

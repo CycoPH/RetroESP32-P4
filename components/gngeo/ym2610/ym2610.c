@@ -111,6 +111,7 @@
 #include <stdarg.h>
 #include <math.h>
 #include "esp_timer.h"
+#include "esp_attr.h"
 
 #include "mvs.h"
 #include "../state.h"
@@ -167,7 +168,7 @@
  *   TL_RES_LEN - sinus resolution (X axis)
  */
 #define TL_TAB_LEN (13*2*TL_RES_LEN)
-static signed int ALIGN_DATA tl_tab[TL_TAB_LEN];
+static signed int EXT_RAM_BSS_ATTR tl_tab[TL_TAB_LEN];
 
 #define ENV_QUIET		(TL_TAB_LEN>>3)
 
@@ -420,7 +421,7 @@ static const u8 ALIGN_DATA lfo_pm_output[7 * 8][8] = { /* 7 bits meaningful (of 
 };
 
 /* all 128 LFO PM waveforms */
-static s32 ALIGN_DATA lfo_pm_table[128 * 8 * 32]; /* 128 combinations of 7 bits meaningful (of F-NUMBER), 8 LFO depths, 32 LFO output levels per one depth */
+static s32 EXT_RAM_BSS_ATTR lfo_pm_table[128 * 8 * 32]; /* 128 combinations of 7 bits meaningful (of F-NUMBER), 8 LFO depths, 32 LFO output levels per one depth */
 
 /*----------------------------------
  for SSG emulator

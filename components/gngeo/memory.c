@@ -26,6 +26,14 @@
 #include "pd4990a.h"
 #include "transpack.h"
 
+/* Memory map arrays from generator68k_interf.c */
+extern Uint8 (*mem68k_fetch_byte[0x1000])(Uint32 addr);
+extern Uint16 (*mem68k_fetch_word[0x1000])(Uint32 addr);
+extern Uint32 (*mem68k_fetch_long[0x1000])(Uint32 addr);
+extern void (*mem68k_store_byte[0x1000])(Uint32 addr, Uint8 data);
+extern void (*mem68k_store_word[0x1000])(Uint32 addr, Uint16 data);
+extern void (*mem68k_store_long[0x1000])(Uint32 addr, Uint32 data);
+
 #ifdef GP2X
 #include "ym2610-940/940shared.h"
 #endif
@@ -250,6 +258,7 @@ LONG_FETCH(mem68k_fetch_ram)
 /**** CPU ****/
 Uint8 mem68k_fetch_cpu_byte(Uint32 addr) {
     addr &= 0xFFFFF;
+
     return (READ_BYTE_ROM(memory.rom.cpu_m68k.p + addr));
 }
 
@@ -264,6 +273,8 @@ Uint16 mem68k_fetch_cpu_word(Uint32 addr) {
         default: return READ_WORD_ROM(memory.rom.cpu_m68k.p + addr);
         }
     }
+
+
 
     return (READ_WORD_ROM(memory.rom.cpu_m68k.p + addr));
 }
@@ -364,7 +375,7 @@ Uint8 mem68k_fetch_ctl1_byte(Uint32 addr) {
     if (!(addr & 1))
         return memory.intern_p1;           /* REG_P1CNT: even addresses */
     if (addr == 0x81)
-        return 0xFF;                        /* REG_SYSTYPE: MVS board (all DIPs open) */
+        return 0xBF;                        /* REG_SYSTYPE: bit6=0 -> 1-slot MVS */
     return (conf.test_switch ? 0xFE : 0xFF); /* REG_DIPSW: bit0=test switch */
 }
 
@@ -411,7 +422,18 @@ Uint8 mem68k_fetch_coin_byte(Uint32 addr) {
     if (addr & 1) {
         int coinflip = read_4990_testbit();
         int databit = read_4990_databit();
-        return memory.intern_coin ^ (coinflip << 6) ^ (databit << 7);
+        Uint8 result = memory.intern_coin ^ (coinflip << 6) ^ (databit << 7);
+        /* Trace coin reads around coin insertion frames */
+        {
+            extern int total_frames;
+            static int coin_rd_trace = 0;
+            if (coin_rd_trace < 30 && total_frames >= 295 && total_frames <= 310) {
+                printf("COIN_RD: f=%d addr=0x%06X result=0x%02X intern=0x%02X flip=%d data=%d\n", 
+                       total_frames, addr, result, memory.intern_coin, coinflip, databit);
+                coin_rd_trace++;
+            }
+        }
+        return result;
     }
     /* Even address: sound result code */
     {
@@ -721,12 +743,15 @@ void mem68k_store_z80_long(Uint32 addr, Uint32 data) {
 /**** SETTINGS ****/
 void mem68k_store_setting_byte(Uint32 addr, Uint8 data) {
     addr &= 0xFFFF;
+
     if (addr == 0x0003) {
+        //printf("BIOS_VEC: switch to BIOS vectors\n");
         memcpy(memory.rom.cpu_m68k.p, memory.rom.bios_m68k.p, 0x80);
         memory.current_vector=0;
     }
 
     if (addr == 0x0013) {
+        //printf("GAME_VEC: switch to GAME vectors!\n");
         memcpy(memory.rom.cpu_m68k.p, memory.game_vector, 0x80);
         memory.current_vector=1;
     }
@@ -899,3 +924,103 @@ void mem68k_store_bk_normal_word(Uint32 addr, Uint16 data) {
 
 LONG_STORE(mem68k_store_bk_normal)
 ;
+
+/**** PVC Protection (mslug5, svc, kof2003) ****/
+/* Word-based RAM matching MAME's uint16_t m_cart_ram[0x1000] */
+static Uint16 pvc_ram[0x1000];  /* 4K words = 8KB for 0x2FE000-0x2FFFFF */
+
+static void pvc_prot1(void) {
+    /* Rotate word at [0xFF8] right by 1, store in [0xFF9] */
+    Uint16 v = pvc_ram[0xFF8];
+    pvc_ram[0xFF9] = (v >> 1) | ((v & 1) << 15);
+}
+
+static void pvc_prot2(void) {
+    /* Bit permutation on word at [0xFF9], store in [0xFF8] */
+    Uint16 v = pvc_ram[0xFF9];
+    pvc_ram[0xFF8] = (((v >> 14) & 1) | ((v >> 4) & 0x0002) |
+                      ((v << 4) & 0x0004) | ((v >> 7) & 0x0008) |
+                      ((v >> 1) & 0x0010) | ((v >> 5) & 0x0020) |
+                      ((v << 8) & 0x0040) | ((v >> 9) & 0x0080) |
+                      ((v >> 2) & 0x0100) | ((v << 5) & 0x0200) |
+                      ((v << 3) & 0x0400) | ((v >> 6) & 0x0800) |
+                      ((v << 12) & 0x1000) | ((v << 1) & 0x2000) |
+                      ((v >> 3) & 0x4000) | ((v << 6) & 0x8000));
+}
+
+static void pvc_write_bankswitch(void) {
+    /* Bank address from words at 0x2FFFF0 and 0x2FFFF2 */
+    Uint32 bankaddr = ((Uint32)(pvc_ram[0xFF8] >> 8)) | ((Uint32)pvc_ram[0xFF9] << 8);
+    //printf("PVC_BANK: w0=0x%04X w1=0x%04X raw=0x%06X final=0x%06X romsz=0x%X\n",
+    //       pvc_ram[0xFF8], pvc_ram[0xFF9], bankaddr, bankaddr + 0x100000,
+    //       (unsigned)memory.rom.cpu_m68k.size);
+    /* Write back status like MAME: game reads these values */
+    pvc_ram[0xFF8] = (pvc_ram[0xFF8] & 0xFE00) | 0x00A0;
+    pvc_ram[0xFF9] &= 0x7FFF;
+    bankaddr += 0x100000;
+    if (bankaddr >= memory.rom.cpu_m68k.size)
+        bankaddr = 0x100000;
+    bankaddress = bankaddr;
+    cpu_68k_bankswitch(bankaddress);
+}
+
+Uint8 mem68k_fetch_pvc_byte(Uint32 addr) {
+    Uint16 word = pvc_ram[(addr & 0x1FFF) >> 1];
+    /* 68K big-endian: even addr = MSB, odd addr = LSB */
+    if (addr & 1)
+        return word & 0xFF;
+    else
+        return (word >> 8) & 0xFF;
+}
+
+Uint16 mem68k_fetch_pvc_word(Uint32 addr) {
+    return pvc_ram[(addr & 0x1FFF) >> 1];
+}
+
+LONG_FETCH(mem68k_fetch_pvc)
+;
+
+void mem68k_store_pvc_byte(Uint32 addr, Uint8 data) {
+    Uint32 woff = (addr & 0x1FFF) >> 1;
+    Uint16 word = pvc_ram[woff];
+    /* 68K big-endian: even addr = MSB, odd addr = LSB */
+    if (addr & 1)
+        pvc_ram[woff] = (word & 0xFF00) | data;
+    else
+        pvc_ram[woff] = (word & 0x00FF) | (data << 8);
+}
+
+void mem68k_store_pvc_word(Uint32 addr, Uint16 data) {
+    Uint32 woff = (addr & 0x1FFF) >> 1;
+
+    pvc_ram[woff] = data;
+
+    if (woff == 0xFF8 || woff == 0xFF9) {
+        pvc_write_bankswitch();
+    } else if (woff == 0xFFA) {
+        pvc_prot1();
+    } else if (woff == 0xFFB) {
+        pvc_prot2();
+    }
+}
+
+LONG_STORE(mem68k_store_pvc)
+;
+
+void install_pvc_protection(void) {
+    memset(pvc_ram, 0, sizeof(pvc_ram));
+    /* Override pages 0x2FE-0x2FF in the memory map with PVC handlers */
+    mem68k_fetch_byte[0x2FE] = mem68k_fetch_pvc_byte;
+    mem68k_fetch_word[0x2FE] = mem68k_fetch_pvc_word;
+    mem68k_fetch_long[0x2FE] = mem68k_fetch_pvc_long;
+    mem68k_store_byte[0x2FE] = mem68k_store_pvc_byte;
+    mem68k_store_word[0x2FE] = mem68k_store_pvc_word;
+    mem68k_store_long[0x2FE] = mem68k_store_pvc_long;
+    mem68k_fetch_byte[0x2FF] = mem68k_fetch_pvc_byte;
+    mem68k_fetch_word[0x2FF] = mem68k_fetch_pvc_word;
+    mem68k_fetch_long[0x2FF] = mem68k_fetch_pvc_long;
+    mem68k_store_byte[0x2FF] = mem68k_store_pvc_byte;
+    mem68k_store_word[0x2FF] = mem68k_store_pvc_word;
+    mem68k_store_long[0x2FF] = mem68k_store_pvc_long;
+    printf("PVC protection installed (0x2FE000-0x2FFFFF)\n");
+}

@@ -1,0 +1,2 @@
+source C:/ESPIDFprojects/RetroESP32_P4/apps/prosystem/build/bootloader/gdbinit/symbols
+source C:/ESPIDFprojects/RetroESP32_P4/apps/prosystem/build/bootloader/gdbinit/connect

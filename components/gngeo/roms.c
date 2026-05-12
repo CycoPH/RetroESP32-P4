@@ -68,6 +68,7 @@ void neogeo_cmc50_m1_decrypt(GAME_ROMS *r);
 static int need_decrypt = 1;
 
 int neogeo_fix_bank_type = 0;
+int neogeo_pvc_protection = 0;  /* set by init_mslug5/svc/kof2003, installed after mem68k_init */
 
 int bankoffset_kof99[64] = {
 	0x000000, 0x100000, 0x200000, 0x300000, 0x3cc000,
@@ -550,14 +551,66 @@ int init_pnyaa(GAME_ROMS *r) {
 }
 
 int init_mslug5(GAME_ROMS *r) {
+	Uint8 *p = r->cpu_m68k.p;
+	int rom_size = r->cpu_m68k.size;
+
+	/* mslug5 P-ROMs use MAME load32_word_swap: two 4MB files interleaved
+	 * at 16-bit word granularity within 32-bit longwords.
+	 * p1 at offset 0, p2 at offset 2 within each 4-byte group.
+	 * Our loader places p1 at 0x000000 and p2 at 0x400000 sequentially.
+	 * Re-interleave: for each 4 bytes of output, take 2 bytes from p1 half
+	 * and 2 bytes from p2 half. */
+	if (rom_size == 0x800000) {
+		int half = rom_size / 2; /* 0x400000 */
+		Uint8 *buf = (Uint8 *)malloc(rom_size);
+		if (buf) {
+			memcpy(buf, p, rom_size);
+			printf("MSLUG5: Interleaving P-ROMs (load32_word_swap)\n");
+			for (int i = 0; i < half; i += 2) {
+				/* Output offset: i*2 (since each 2-byte input pair produces 4 output bytes) */
+				int out = i * 2;
+				/* Word from p1 (first half) -> bytes 0-1 of each 4-byte group */
+				p[out + 0] = buf[i + 0];
+				p[out + 1] = buf[i + 1];
+				/* Word from p2 (second half) -> bytes 2-3 of each 4-byte group */
+				p[out + 2] = buf[half + i + 0];
+				p[out + 3] = buf[half + i + 1];
+			}
+			free(buf);
+			printf("MSLUG5: Interleave done. First 8 bytes: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+				p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
+		} else {
+			printf("MSLUG5: WARNING - cannot allocate interleave buffer!\n");
+		}
+	} else {
+		printf("MSLUG5: ROM size 0x%X != 0x800000, skipping interleave\n", rom_size);
+	}
+
+	/* Dump raw loaded bytes BEFORE any processing */
+	printf("MSLUG5 RAW (before decrypt):\n");
+	printf("  @0x100: %02X %02X %02X %02X  %02X %02X %02X %02X\n",
+		p[0x100],p[0x101],p[0x102],p[0x103],p[0x104],p[0x105],p[0x106],p[0x107]);
+
 	if (need_decrypt) {
+		/* NO pre-swap: gngeo's neocrypt.c operates on raw BE data.
+		 * swap_memory in cpu_68k_init handles LE conversion afterwards. */
 		mslug5_decrypt_68k(r);
 		neo_pcm2_swap(r, 2);
 		neogeo_cmc50_m1_decrypt(r);
 		kof2000_neogeo_gfx_decrypt(r, 0x19);
 	}
+
+	/* Dump key offsets after decrypt for debugging */
+	printf("MSLUG5 after decrypt:\n");
+	printf("  @0x000 (SSP/PC): %02X %02X %02X %02X  %02X %02X %02X %02X\n",
+		p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
+	printf("  @0x100 (header):  %02X %02X %02X %02X  %02X %02X %02X %02X\n",
+		p[0x100],p[0x101],p[0x102],p[0x103],p[0x104],p[0x105],p[0x106],p[0x107]);
+	printf("  @0x122 (USER):    %02X %02X %02X %02X  %02X %02X %02X %02X\n",
+		p[0x122],p[0x123],p[0x124],p[0x125],p[0x126],p[0x127],p[0x128],p[0x129]);
+
 	neogeo_fix_bank_type = 1;
-	//install_pvc_protection(r);
+	neogeo_pvc_protection = 1;
 	return 0;
 }
 
@@ -585,7 +638,7 @@ int init_ms5pcb(GAME_ROMS *r) {
 		neo_pcm2_swap(r, 2);
 	}
 	neogeo_fix_bank_type = 2;
-	//install_pvc_protection(r);
+	neogeo_pvc_protection = 1;
 	return 0;
 }
 
@@ -1297,16 +1350,22 @@ static int setup_sprite_streaming(const char *ctile_path, Uint32 tile_size) {
 		if (init_sprite_cache(cache_bytes, SPRITE_BANK_SIZE) == GN_TRUE) {
 			printf("Sprite streaming: %u MB cache, %u tiles, bank=%d\n",
 				   cache_sizes[i], memory.nb_of_tiles, SPRITE_BANK_SIZE);
-			/* DMA-aligned bounce buffer in internal RAM for SDMMC DMA. */
-			gcache->bounce_buf = heap_caps_aligned_alloc(64, SPRITE_BANK_SIZE,
-														 MALLOC_CAP_DMA);
+			/* DMA bounce buffer for SDMMC reads.
+			 * Try internal RAM first (4-byte align is enough for non-cached SRAM),
+			 * fall back to PSRAM (64-byte cache-line align for DMA coherency). */
+			gcache->bounce_buf = heap_caps_aligned_alloc(4, SPRITE_BANK_SIZE,
+														 MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+			if (!gcache->bounce_buf)
+				gcache->bounce_buf = heap_caps_aligned_alloc(64, SPRITE_BANK_SIZE,
+															 MALLOC_CAP_SPIRAM);
 			if (gcache->bounce_buf)
-				printf("Sprite bounce buffer: %d bytes (DMA @ %p, free=%u)\n",
+				printf("Sprite bounce buffer: %d bytes @ %p (free DMA=%u)\n",
 					   SPRITE_BANK_SIZE, gcache->bounce_buf,
 					   (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
 			else
-				printf("WARNING: bounce buffer alloc failed (%u free DMA)\n",
-					   (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
+				printf("ERROR: bounce buffer alloc failed (%u free DMA, %u free SPIRAM)\n",
+					   (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+					   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 			return GN_TRUE;
 		}
 	}
@@ -1632,6 +1691,7 @@ static int init_roms(GAME_ROMS *r) {
 	int i = 0;
 	//printf("INIT ROM %s\n",r->info.name);
 	neogeo_fix_bank_type = 0;
+	neogeo_pvc_protection = 0;
 	memory.bksw_handler = 0;
 	memory.bksw_unscramble = NULL;
 	memory.bksw_offset = NULL;
@@ -1826,12 +1886,12 @@ int dr_load_roms(GAME_ROMS *r, char *rom_path, char *name) {
 	}
 
 	/* Open Parent.
-	 For now, only one parent is supported, no recursion
+	 For now, only one parent is supported, no recursion.
+	 Non-fatal: merged ROM sets contain all files in the clone ZIP.
 	 */
 	gzp = open_rom_zip(rom_path, drv->parent);
 	if (gzp == NULL) {
-		gn_set_error_msg("Parent %s/%s.zip not found\n", rom_path, name);
-		return GN_FALSE;
+		printf("Parent %s/%s.zip not found — trying merged ROM set\n", rom_path, drv->parent);
 	}
 
 	//printf("year %d\n",drv->year);
@@ -2108,9 +2168,23 @@ int dr_load_roms(GAME_ROMS *r, char *rom_path, char *name) {
 	gn_init_pbar("Loading...", romsize);
 	int64_t load_start_us = esp_timer_get_time();
 	int64_t total_skip_us = 0, total_load_us = 0;
+	Uint32 cpu_m68k_next_offset = 0;  /* Track sequential P-ROM loading offset */
 	for (i = 0; i < drv->nb_romfile; i++) {
 		int region = drv->rom[i].region;
 		int64_t file_start_us = esp_timer_get_time();
+
+		/* Fix .drv files that encode ROM_LOAD16_WORD_SWAP byte-lane as dest.
+		 * Only dest==2 is an interleave indicator; all other dest values
+		 * (including 0) are legitimate byte offsets. */
+		Uint32 dest_fix = drv->rom[i].dest;
+		if (region == REGION_MAIN_CPU_CARTRIDGE) {
+			if (dest_fix == 2) {
+				printf("FIX P-ROM interleave: %s dest=0x2 -> 0x%X\n",
+					   drv->rom[i].filename, cpu_m68k_next_offset);
+				dest_fix = cpu_m68k_next_offset;
+			}
+			cpu_m68k_next_offset = dest_fix + drv->rom[i].size;
+		}
 
 		/* Skip extraction for regions that have existing cache files */
 		if (region == REGION_SPRITES && skip_tile_extract) {
@@ -2136,14 +2210,14 @@ int dr_load_roms(GAME_ROMS *r, char *rom_path, char *name) {
 		}
 
 		if (load_region(gz, r, drv->rom[i].region, drv->rom[i].src,
-				drv->rom[i].dest, drv->rom[i].size, drv->rom[i].crc,
+				dest_fix, drv->rom[i].size, drv->rom[i].crc,
 				drv->rom[i].filename) != 0) {
 			/* File not found in the roms, try the parent */
 			if (gzp) {
 				int region = drv->rom[i].region;
 				int pi;
 				pi = load_region(gzp, r, drv->rom[i].region, drv->rom[i].src,
-						drv->rom[i].dest, drv->rom[i].size, drv->rom[i].crc,
+						dest_fix, drv->rom[i].size, drv->rom[i].crc,
 						drv->rom[i].filename);
 				DEBUG_LOG("From parent %d\n", pi);
 				if (pi && (region != 5 && region != 0 && region != 7
@@ -2184,6 +2258,14 @@ int dr_load_roms(GAME_ROMS *r, char *rom_path, char *name) {
 	gn_close_zip(gz);
 	if (gzp) gn_close_zip(gzp);
 	free(drv);
+
+	/* Run game-specific ROM decryption BEFORE allocating streaming caches.
+	 * Decrypt functions need large temp buffers (up to 8MB for mslug5).
+	 * Sprite/ADPCM caches haven't been allocated yet, so PSRAM is available. */
+	free(iloadbuf);
+	iloadbuf = NULL;
+	gn_loading_info("Decrypting ROMs...");
+	init_roms(r);
 
 	/* Handle streaming tile cache creation */
 	if (streaming_tiles) {
@@ -2310,13 +2392,6 @@ int dr_load_roms(GAME_ROMS *r, char *rom_path, char *name) {
 	memory.fix_game_usage = r->gfix_usage.p;
 	memory.nb_of_tiles = r->tiles.size >> 7;
 
-	free(iloadbuf);
-	iloadbuf = NULL;
-
-	/* Init rom and bios */
-	gn_loading_info("Decrypting ROMs...");
-	init_roms(r);
-
 	/* Convert tiles (only if loaded in PSRAM, not streaming) */
 	if (!streaming_tiles) {
 		gn_loading_info("Converting tiles...");
@@ -2357,6 +2432,12 @@ int dr_load_game(char *name) {
 	//	set_bankswitchers(0);
 
 	memcpy(memory.game_vector, memory.rom.cpu_m68k.p, 0x80);
+	printf("ROM header @0x100: ");
+	for (int hh = 0; hh < 16; hh++) printf("%02x ", memory.rom.cpu_m68k.p[0x100+hh]);
+	printf(" '%.8s'\n", (char*)&memory.rom.cpu_m68k.p[0x100]);
+	printf("ROM vectors @0x00: ");
+	for (int hh = 0; hh < 16; hh++) printf("%02x ", memory.rom.cpu_m68k.p[hh]);
+	printf("\n");
 	memcpy(memory.rom.cpu_m68k.p, memory.rom.bios_m68k.p, 0x80);
 
 	/* For CMC42/CMC50 games in streaming mode, neogeo_sfix_decrypt() is skipped
@@ -2816,9 +2897,11 @@ void open_nvram(char *name) {
 
     if ((f = fopen(filename, "rb")) == 0)
         return;
+    printf("SRAM: Loading %s\n", filename);
     totread = fread(memory.sram, 1, 0x10000, f);
     fclose(f);
-
+    printf("SRAM: loaded %d bytes, [0x100]=%02x%02x%02x%02x\n",
+        (int)totread, memory.sram[0x100], memory.sram[0x101], memory.sram[0x102], memory.sram[0x103]);
 }
 
 /* TODO: multiple memcard */

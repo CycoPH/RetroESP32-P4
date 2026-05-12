@@ -1,0 +1,2 @@
+source C:/ESPIDFprojects/RetroESP32_P4/apps/snes/build/bootloader/gdbinit/symbols
+source C:/ESPIDFprojects/RetroESP32_P4/apps/snes/build/bootloader/gdbinit/connect

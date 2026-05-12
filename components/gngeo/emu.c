@@ -161,6 +161,7 @@ void init_neo(void) {
 #ifdef ENABLE_940T
 	int z80_overclk = CF_VAL(cf_get_item_by_name("z80clock"));
 #endif
+	extern int neogeo_pvc_protection;
 
 	neogeo_init_save_state();
 
@@ -169,6 +170,12 @@ void init_neo(void) {
 #endif
 
 	cpu_68k_init();
+
+	/* Install PVC protection AFTER mem68k_init rebuilds the memory map */
+	if (neogeo_pvc_protection) {
+		install_pvc_protection();
+	}
+
 //	neogeo_reset();
 	pd4990a_init();
 //	setup_misc_patch(rom_name);
@@ -330,6 +337,7 @@ static inline int update_scanline(void) {
 }
 
 static int slow_motion = 0;
+int total_frames = 0;
 
 void neogeo_main_loop(void) {
 	int neo_emu_done = 0;
@@ -377,9 +385,17 @@ void neogeo_main_loop(void) {
 #endif
 
 	//pause_audio(0);
+	total_frames = 0;
 	while (!neo_emu_done) {
 		/* FPS measurement */
 		fps_frame_count++;
+		total_frames++;
+
+		/* Trace PC at frame boundaries to debug BIOS stuck state */
+		if (total_frames <= 5 || (total_frames >= 230 && total_frames <= 260) || (total_frames % 60 == 0 && total_frames <= 1200)) {
+			printf("FRAME %d: PC=0x%06X vec=%d\n", total_frames, cpu_68k_getpc(), memory.current_vector);
+		}
+
 		int64_t now = esp_timer_get_time();
 		if (now - fps_last_time >= 1000000) { /* every 1 second */
 			printf("FPS: %d (rendered: %d, skipped: %d)\n", fps_frame_count, fps_render_count, fps_frame_count - fps_render_count);

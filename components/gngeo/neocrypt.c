@@ -972,7 +972,16 @@ void neogeo_cmc50_m1_decrypt(running_machine *machine)
 	//size_t rom_size = memory_region_length(machine, "audiocrypt");;
 	UINT8* rom2 = memory_region(machine, "audiocpu");
 
-	UINT8* buffer = alloc_array_or_die(UINT8, rom_size);
+	if (!rom || !rom2) {
+		printf("CMC50 M1 decrypt skipped (audio ROM not loaded)\n");
+		return;
+	}
+
+	UINT8* buffer = (UINT8 *)malloc(rom_size);
+	if (!buffer) {
+		printf("CMC50 M1 decrypt skipped (cannot allocate %d KB temp buffer)\n", (int)(rom_size / 1024));
+		return;
+	}
 
 	UINT32 i;
 
@@ -1261,7 +1270,11 @@ void kof2002_decrypt_68k(running_machine *machine)
 	int i;
 	static const int sec[]={0x100000,0x280000,0x300000,0x180000,0x000000,0x380000,0x200000,0x080000};
 	UINT8 *src = memory_region(machine, "maincpu")+0x100000;
-	UINT8 *dst = alloc_array_or_die(UINT8, 0x400000);
+	UINT8 *dst = (UINT8 *)malloc(0x400000);
+	if (!dst) {
+		printf("kof2002_decrypt_68k skipped (cannot allocate 4MB temp buffer)\n");
+		return;
+	}
 		memcpy( dst, src, 0x400000 );
 		for( i=0; i<8; ++i )
 		{
@@ -1327,7 +1340,11 @@ void mslug5_decrypt_68k(running_machine *machine)
 	int ofst;
 	int rom_size = 0x800000;
 	UINT8 *rom = memory_region( machine, "maincpu" );
-	UINT8 *buf = alloc_array_or_die(UINT8,  rom_size );
+	UINT8 *buf = (UINT8 *)malloc(rom_size);
+	if (!buf) {
+		printf("mslug5_decrypt_68k skipped (cannot allocate %d MB temp buffer)\n", rom_size / (1024*1024));
+		return;
+	}
 
 	for( i = 0; i < 0x100000; i++ )
 	{
@@ -1597,9 +1614,15 @@ void neo_pcm2_swap(running_machine *machine, int value)
 		{0x4b,0xa4,0x63,0x46,0xf0,0x91,0xea,0x62},
 		{0x4b,0xa4,0x63,0x46,0xf0,0x91,0xea,0x62}};
 	UINT8 *src = memory_region(machine, "ym");
-	UINT8 *buf = alloc_array_or_die(UINT8, 0x1000000);
+	UINT8 *buf;
 	int i, j, d;
 
+	if (!src) {
+		printf("PCM2 swap skipped (ADPCM streaming)\n");
+		return;
+	}
+
+	buf = alloc_array_or_die(UINT8, 0x1000000);
 	memcpy(buf,src,0x1000000);
 	for (i=0;i<0x1000000;i++)
 	{
