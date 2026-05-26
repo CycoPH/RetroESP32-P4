@@ -1986,6 +1986,10 @@ static inline void YM2612Update(int16_t *buffer, int length)
     lt += out_fm[5];
    // rt += out_fm[5];
 
+    /* Clamp sum to int16 range — 6 channels can exceed ±32767 */
+    if (lt > 32767) lt = 32767;
+    else if (lt < -32768) lt = -32768;
+
     *buffer++ = lt;
 
     /* CSM mode: if CSM Key ON has occured, CSM Key OFF need to be sent       */

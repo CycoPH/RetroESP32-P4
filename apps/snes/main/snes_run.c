@@ -60,6 +60,7 @@ extern SGFX GFX;
 
 /* ─── Module state ─────────────────────────────────────────────── */
 static volatile bool snes_quit_flag = false;
+static volatile bool snes_audio_resync = false;  /* signal audio task to reset time base */
 static volatile bool videoTaskRunning = false;
 static volatile bool audioTaskRunning = false;
 
@@ -222,21 +223,37 @@ static void snes_audio_task(void *arg)
 {
     audioTaskRunning = true;
     int dma_idx = 0;
-    /* Fractional sample accumulator — avoids drift from 32000/60 = 533.333...
-     * Every 3rd frame we mix 534 instead of 533, keeping the buffer aligned. */
-    int frac_acc = 0;
+    /* Wall-clock based sample counting — avoids underruns when FPS < 60.
+     * Track cumulative samples that *should* have been produced by now
+     * vs. how many we actually produced, and mix the difference each frame. */
+    int64_t audio_start_time = esp_timer_get_time();
+    int64_t samples_produced = 0;
 
     while (1) {
         /* Wait for signal from emu loop that a frame is ready to mix */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (snes_quit_flag) break;
 
-        /* Compute exact number of samples for this frame */
-        int remaining = AUDIO_SAMPLE_RATE / TARGET_FPS;
-        frac_acc += AUDIO_SAMPLE_RATE % TARGET_FPS;  /* += 32000 % 60 = 20 */
-        if (frac_acc >= TARGET_FPS) {
-            frac_acc -= TARGET_FPS;
-            remaining++;  /* mix 534 this frame instead of 533 */
+        /* Re-sync time base after menu/pause to avoid massive catch-up burst */
+        if (snes_audio_resync) {
+            snes_audio_resync = false;
+            audio_start_time = esp_timer_get_time();
+            samples_produced = 0;
+        }
+
+        /* Compute how many total samples should exist by now */
+        int64_t now = esp_timer_get_time();
+        int64_t elapsed_us = now - audio_start_time;
+        int64_t target_samples = (elapsed_us * AUDIO_SAMPLE_RATE) / 1000000;
+        int remaining = (int)(target_samples - samples_produced);
+
+        /* Clamp: don't go negative, and cap at 2 frames worth to avoid
+         * massive catch-up bursts after pauses (menu, save/load) */
+        if (remaining <= 0) remaining = 0;
+        if (remaining > (AUDIO_SAMPLE_RATE / TARGET_FPS) * 2) {
+            remaining = (AUDIO_SAMPLE_RATE / TARGET_FPS) * 2;
+            /* Re-sync time base to avoid permanent drift */
+            audio_start_time = now - (samples_produced * 1000000 / AUDIO_SAMPLE_RATE);
         }
 
         /* Mix + submit audio on Core 1 — frees Core 0 from ~1ms work */
@@ -245,6 +262,7 @@ static void snes_audio_task(void *arg)
             int16_t *dest = audio_dma_buf[dma_idx];
             S9xMixSamples(dest, n * 2);  /* stereo: n*2 int16_t */
             odroid_audio_submit(dest, n);
+            samples_produced += n;
             dma_idx = (dma_idx + 1) % AUD_QUEUE_DEPTH;
             remaining -= n;
         }
@@ -781,8 +799,8 @@ static void snes_init_core(void)
     Settings.ControllerOption = SNES_JOYPAD;
     Settings.HBlankStart = (256 * Settings.H_Max) / SNES_HCOUNTER_MAX;
     Settings.SoundPlaybackRate = AUDIO_SAMPLE_RATE;
-    Settings.DisableSoundEcho = true;   /* skip echo FIR filter — removes metallic artefact */
-    Settings.InterpolatedSound = false; /* cheaper mixing, avoids hi-freq ringing */
+    Settings.DisableSoundEcho = false;  /* echo/reverb — many games need it (DKC, FF6, etc.) */
+    Settings.InterpolatedSound = true;  /* linear interpolation — removes aliasing */
 
     if (!S9xInitMemory()) {
         ESP_LOGE(TAG, "S9xInitMemory failed");
@@ -1035,6 +1053,7 @@ void snes_run(const char *rom_path)
 
         if (gp.values[ODROID_INPUT_VOLUME] && !gp_prev.values[ODROID_INPUT_VOLUME]) {
             snes_show_volume();
+            snes_audio_resync = true;
             fps_timer = esp_timer_get_time();
             frame_timer = esp_timer_get_time();
             framedrop_balance = 0;
@@ -1046,6 +1065,7 @@ void snes_run(const char *rom_path)
                 break;
             }
             /* After resume, re-seed timers */
+            snes_audio_resync = true;
             fps_timer = esp_timer_get_time();
             frame_timer = esp_timer_get_time();
             framedrop_balance = 0;

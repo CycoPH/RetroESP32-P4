@@ -340,7 +340,17 @@ static void genesis_video_task(void *arg)
 
 /* ─── Audio Task (Core 1) ──────────────────────────────────────── */
 /* Runs FM + PSG synthesis AND mixing/submission on Core 1,
- * freeing ~3.7ms per frame from the Core 0 emulation loop. */
+ * freeing ~3.7ms per frame from the Core 0 emulation loop.
+ *
+ * The gwenesis synth produces ~888 samples/frame at native 53 kHz tied
+ * to M68K clocks.  At <60 FPS the I2S would underrun if configured at
+ * 53 kHz.  Instead we init I2S at a lower rate and downsample 2:1 with
+ * linear interpolation, producing ~444 samples/frame.  At 44 FPS that
+ * yields ~19,536 samples/sec vs 22,050 I2S → small surplus absorbed by
+ * the DMA buffer without blocking.
+ */
+#define GEN_I2S_RATE   22050      /* I2S output rate — half native */
+
 static void genesis_audio_task(void *arg)
 {
     audioTaskRunning = true;
@@ -358,22 +368,33 @@ static void genesis_audio_task(void *arg)
         /* Signal that synthesis is done (safe to reset clocks) */
         xSemaphoreGive(audio_done_sem);
 
-        /* ── Mix SN76489 + YM2612 into a single stereo-interleaved buffer ── */
+        /* ── Mix SN76489 + YM2612 and downsample 2:1 ── */
         int audio_len = sn76489_index > ym2612_index ? sn76489_index : ym2612_index;
         if (audio_len <= 0) continue;
 
+        int out_len = audio_len / 2;
+        if (out_len <= 0) out_len = 1;
+
         int16_t *dest = audio_dma_buf[dma_idx];
-        int remaining = audio_len;
-        int src_off = 0;
+        int out_remaining = out_len;
+        int out_off = 0;
 
-        while (remaining > 0) {
-            int n = (remaining < AUDIO_FRAG_SIZE) ? remaining : AUDIO_FRAG_SIZE;
+        while (out_remaining > 0) {
+            int n = (out_remaining < AUDIO_FRAG_SIZE) ? out_remaining : AUDIO_FRAG_SIZE;
 
-            /* Mix mono into interleaved stereo with clamping */
             for (int i = 0; i < n; i++) {
-                int32_t sn = (src_off + i < sn76489_index) ? gwenesis_sn76489_buffer[src_off + i] : 0;
-                int32_t ym = (src_off + i < ym2612_index)  ? gwenesis_ym2612_buffer[src_off + i]  : 0;
-                int32_t sum = sn + ym;
+                int si = (out_off + i) * 2;      /* source index (every other sample) */
+
+                int32_t sn0 = (si < sn76489_index) ? gwenesis_sn76489_buffer[si] : 0;
+                int32_t ym0 = (si < ym2612_index)  ? gwenesis_ym2612_buffer[si]  : 0;
+                int32_t s0 = sn0 + ym0;
+
+                int32_t sn1 = (si + 1 < sn76489_index) ? gwenesis_sn76489_buffer[si + 1] : sn0;
+                int32_t ym1 = (si + 1 < ym2612_index)  ? gwenesis_ym2612_buffer[si + 1]  : ym0;
+                int32_t s1 = sn1 + ym1;
+
+                /* Average two adjacent samples and scale by 2/3 */
+                int32_t sum = ((s0 + s1) / 2) * 2 / 3;
                 if (sum > 32767) sum = 32767;
                 if (sum < -32768) sum = -32768;
                 dest[i * 2 + 0] = (int16_t)sum;  /* L */
@@ -381,8 +402,8 @@ static void genesis_audio_task(void *arg)
             }
 
             odroid_audio_submit(dest, n);
-            src_off += n;
-            remaining -= n;
+            out_off += n;
+            out_remaining -= n;
         }
 
         dma_idx = (dma_idx + 1) % AUD_QUEUE_DEPTH;
@@ -963,9 +984,9 @@ void genesis_run(const char *rom_path)
     gwenesis_vdp_set_buffer(gen_fb[0]);
 
     /* ── Audio init ── */
-    int audio_rate = REG1_PAL ? GWENESIS_AUDIO_FREQ_PAL : GWENESIS_AUDIO_FREQ_NTSC;
-    odroid_audio_init(audio_rate);
-    ESP_LOGI(TAG, "Audio sample rate: %d Hz", audio_rate);
+    odroid_audio_init(GEN_I2S_RATE);
+    ESP_LOGI(TAG, "Audio: synth=%d Hz, I2S=%d Hz (2:1 downsample)",
+             REG1_PAL ? GWENESIS_AUDIO_FREQ_PAL : GWENESIS_AUDIO_FREQ_NTSC, GEN_I2S_RATE);
 
     /* ── Pre-render sidebar buttons ── */
 #ifndef CONFIG_HDMI_OUTPUT

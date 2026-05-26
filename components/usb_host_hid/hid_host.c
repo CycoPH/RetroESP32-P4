@@ -503,10 +503,13 @@ static bool hid_host_device_init_attempt(uint8_t dev_addr)
     const usb_config_desc_t *config_desc = NULL;
     hid_device_t *hid_device = NULL;
 
-    if (usb_host_device_open(s_hid_driver->client_handle, dev_addr, &dev_hdl) == ESP_OK) {
-        if (usb_host_get_active_config_descriptor(dev_hdl, &config_desc) == ESP_OK) {
-            is_hid_device = hid_interface_present(config_desc);
-        }
+    if (usb_host_device_open(s_hid_driver->client_handle, dev_addr, &dev_hdl) != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to open USB device at address %d", dev_addr);
+        return false;
+    }
+
+    if (usb_host_get_active_config_descriptor(dev_hdl, &config_desc) == ESP_OK) {
+        is_hid_device = hid_interface_present(config_desc);
     }
 
     // Create HID interfaces list in RAM, connected to the particular USB dev

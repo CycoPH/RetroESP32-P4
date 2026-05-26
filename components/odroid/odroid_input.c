@@ -96,6 +96,7 @@ static int64_t      s_touch_last_us = 0;
 #define ADC_THRESH_MID_HI  2200
 
 static bool s_gpio_pad_detected = false;
+static bool s_gpio_pad_l2_stuck = false; /* GPIO 30 (L2/R) reads HIGH despite pull-down */
 static adc_oneshot_unit_handle_t s_gpio_pad_adc = NULL;
 #endif /* !CONFIG_HDMI_OUTPUT */
 
@@ -151,30 +152,28 @@ static void gpio_pad_detect_and_init(void)
     ESP_LOGI(TAG, "GPIO gamepad DETECTED (GPIO %d reads LOW)", GPIO_PAD_L1);
     s_gpio_pad_detected = true;
 
-    /* Configure digital button GPIOs as input */
-    const int dig_pins[] = { GPIO_PAD_L1, GPIO_PAD_L2, GPIO_PAD_Y,
-                             GPIO_PAD_START, GPIO_PAD_SELECT };
+    /* Configure digital button GPIOs as input with internal pull-down.
+       Some boards lack physical pull-downs, causing floating pins to
+       read HIGH and produce phantom button presses (e.g. GPIO 30 → R). */
+    const int dig_pins[] = { GPIO_PAD_L1, GPIO_PAD_L2, GPIO_PAD_X,
+                             GPIO_PAD_Y, GPIO_PAD_START, GPIO_PAD_SELECT };
     for (int i = 0; i < sizeof(dig_pins)/sizeof(dig_pins[0]); i++) {
         gpio_config_t cfg = {
             .pin_bit_mask  = 1ULL << dig_pins[i],
             .mode          = GPIO_MODE_INPUT,
             .pull_up_en    = GPIO_PULLUP_DISABLE,
-            .pull_down_en  = GPIO_PULLDOWN_DISABLE,  /* physical pull-down on board */
+            .pull_down_en  = GPIO_PULLDOWN_ENABLE,
             .intr_type     = GPIO_INTR_DISABLE,
         };
         gpio_config(&cfg);
     }
 
-    /* GPIO 33 (X) has physical pull-down */
-    {
-        gpio_config_t cfg = {
-            .pin_bit_mask  = 1ULL << GPIO_PAD_X,
-            .mode          = GPIO_MODE_INPUT,
-            .pull_up_en    = GPIO_PULLUP_DISABLE,
-            .pull_down_en  = GPIO_PULLDOWN_DISABLE,
-            .intr_type     = GPIO_INTR_DISABLE,
-        };
-        gpio_config(&cfg);
+    /* Check if GPIO 30 (L2 → R) is stuck HIGH despite internal pull-down.
+       If so, skip reading it at runtime to avoid phantom R presses. */
+    vTaskDelay(pdMS_TO_TICKS(2));
+    if (gpio_get_level(GPIO_PAD_L2)) {
+        s_gpio_pad_l2_stuck = true;
+        ESP_LOGW(TAG, "GPIO %d (L2/R) stuck HIGH despite pull-down — disabling", GPIO_PAD_L2);
     }
 
     /* Set up ADC2 for the three analog inputs (CH0=joy LR, CH1=joy UD, CH3=AB) */
@@ -231,7 +230,8 @@ static void gpio_pad_read(odroid_gamepad_state *state)
 
     /* Digital buttons — all active HIGH (pressed = 1) */
     if (gpio_get_level(GPIO_PAD_L1))     state->values[ODROID_INPUT_L] = 1;
-    if (gpio_get_level(GPIO_PAD_L2))     state->values[ODROID_INPUT_R] = 1;
+    if (!s_gpio_pad_l2_stuck && gpio_get_level(GPIO_PAD_L2))
+                                         state->values[ODROID_INPUT_R] = 1;
     if (gpio_get_level(GPIO_PAD_X))      state->values[ODROID_INPUT_X] = 1;
     if (gpio_get_level(GPIO_PAD_Y))      state->values[ODROID_INPUT_Y] = 1;
     if (gpio_get_level(GPIO_PAD_START))  state->values[ODROID_INPUT_START] = 1;
