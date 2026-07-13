@@ -6,7 +6,7 @@
  * into the launcher's services.
  *
  * Build with: tools\build_psram_app.ps1 -AppName psram_test -Sources apps\psram_test\main.c
- * Deploy to:  SD card /sd/apps/psram_test.papp
+ * Deploy to:  SD card /sd/roms/papp/psram_test.papp
  */
 
 #define PAPP_APP_SIDE 1

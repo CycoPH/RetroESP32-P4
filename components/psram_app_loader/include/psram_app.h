@@ -190,7 +190,7 @@ typedef struct psram_app *psram_app_handle_t;
  * Load a .papp binary from the filesystem into PSRAM.
  * Does NOT execute it yet.
  *
- * @param path   Absolute path, e.g. "/sd/apps/opentyrian.papp"
+ * @param path   Absolute path, e.g. "/sd/roms/papp/opentyrian.papp"
  * @param handle Receives the loaded app handle
  * @return ESP_OK on success
  */

@@ -10,7 +10,7 @@
 #   - tools\pack_papp.py packer script
 #
 # Output:
-#   firmware\<AppName>.papp   — ready to copy to SD card /sd/apps/
+#   firmware\<AppName>.papp   — ready to copy to SD card /sd/roms/papp/
 #
 
 param(
@@ -129,5 +129,5 @@ if ($LASTEXITCODE -ne 0) { throw "pack_papp.py failed" }
 
 Write-Host ""
 Write-Host "=== $AppName.papp ready ===" -ForegroundColor Green
-Write-Host "  Copy to SD card: /sd/apps/$AppName.papp"
+Write-Host "  Copy to SD card: /sd/roms/papp/$AppName.papp"
 Write-Host ""
