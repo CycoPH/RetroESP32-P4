@@ -28,11 +28,11 @@ $ErrorActionPreference = "Stop"
 
 $ROOT      = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $TOOLS_DIR = Join-Path $ROOT "tools"
-$BUILD_DIR = Join-Path $ROOT "build_papp" $AppName
+$BUILD_DIR = Join-Path (Join-Path $ROOT "build_papp") $AppName
 $FW_DIR    = Join-Path $ROOT "firmware"
 $LD_SCRIPT = Join-Path $TOOLS_DIR "psram_app.ld"
 $PACKER    = Join-Path $TOOLS_DIR "pack_papp.py"
-$HEADER    = Join-Path $ROOT "components" "psram_app_loader" "include"
+$HEADER    = Join-Path (Join-Path (Join-Path $ROOT "components") "psram_app_loader") "include"
 
 # Toolchain (should be on PATH after sourcing ESP-IDF export.ps1)
 $CC      = "riscv32-esp-elf-gcc"
