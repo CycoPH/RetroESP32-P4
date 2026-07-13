@@ -38,6 +38,7 @@
 #include "odroid_audio.h"
 #include "odroid_input.h"
 #include "odroid_sdcard.h"
+#include "gt911_touch.h"
 #include "odroid_settings.h"
 #include "pngAux.h"
 #include "ppa_engine.h"
@@ -345,6 +346,19 @@ static int svc_fb_copy(const uint16_t *src, uint16_t *dst,
     return 0;
 }
 
+/* Read the GT911 touch panel, reporting coordinates in landscape
+ * native-framebuffer space (x:0..799, y:0..479) to match
+ * display_get_framebuffer(). The panel is 480x800 portrait; the launcher
+ * uses the same (ty, 479-tx) mapping for its own landscape UI. */
+static int svc_touch_read(int *x, int *y)
+{
+    uint16_t tx = 0, ty = 0;
+    if (!gt911_touch_get_xy(&tx, &ty)) return 0;
+    if (x) *x = (int)ty;              /* landscape X = portrait Y  (0..799) */
+    if (y) *y = 479 - (int)tx;        /* landscape Y = inverted portrait X (0..479) */
+    return 1;
+}
+
 static void populate_services(app_services_t *svc) {
     memset(svc, 0, sizeof(*svc));
     svc->abi_version = PAPP_ABI_VERSION;
@@ -406,6 +420,9 @@ static void populate_services(app_services_t *svc) {
     svc->png_load_rgb565 = svc_png_load_rgb565;
     svc->sprite_blit     = svc_sprite_blit;
     svc->fb_copy         = svc_fb_copy;
+
+    /* Appended after ABI v1 (backward-compatible, see psram_app.h) */
+    svc->touch_read      = svc_touch_read;
 }
 
 /* ── Loader ──────────────────────────────────────────────────────────── */

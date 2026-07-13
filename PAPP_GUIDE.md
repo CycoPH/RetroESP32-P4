@@ -188,11 +188,24 @@ Init once; then submit from your main loop or a dedicated audio task (see §6 fo
 | Function | Signature | Purpose |
 |----------|-----------|---------|
 | `input_gamepad_read` | `void(papp_gamepad_state_t *state)` | Fill `state.values[PAPP_INPUT_*]` (1 = pressed) |
+| `touch_read` | `int(int *x, int *y)` | GT911 touch: returns 1 if touched (fills `*x,*y`), 0 if not. **Null-check first** (see below) |
 
 Buttons: `UP RIGHT DOWN LEFT SELECT START A B X Y L R MENU VOLUME` (prefix `PAPP_INPUT_`). By
-convention **MENU exits** the app. **There is no touch API** — the service table exposes only the
-gamepad. The GT911 touch driver exists in the launcher but is not wired into `app_services_t`;
-exposing it would be an ABI change (new fn pointer + `PAPP_ABI_VERSION` bump + rebuild).
+convention **MENU exits** the app.
+
+**Touch** is reported in **landscape native-framebuffer space** — `x` ∈ [0,799], `y` ∈ [0,479],
+matching `display_get_framebuffer()`. If you draw into a smaller canvas, scale down by your own
+factor. `touch_read` was appended after ABI v1, so it may be `NULL` on an older launcher — always
+guard the call:
+
+```c
+int tx, ty;
+if (svc->touch_read && svc->touch_read(&tx, &ty)) {
+    /* touched at (tx, ty) in 800x480 landscape space */
+}
+```
+
+This null-check is the rule for **every service appended after v1** — see §7.
 
 ### File I/O
 
@@ -327,8 +340,13 @@ that memory → corruption.
   run to help, but your app must exit its audio task gracefully.
 - **USB Serial JTAG:** the launcher stops its serial-upload listener before running a PAPP and restarts
   it after; heavy `log_printf` with no host reading can still stall — keep logging light in hot loops.
-- **ABI version:** bump `PAPP_ABI_VERSION` in `psram_app.h` if you change the table layout, and rebuild
-  both launcher and apps. A mismatched app is rejected at load.
+- **ABI evolution (append-only):** new services are **appended to the end** of `app_services_t`,
+  which keeps every existing field's offset — so existing `.papp` binaries run unchanged with **no
+  rebuild** and `PAPP_ABI_VERSION` stays the same. The cost: a field appended after v1 may be `NULL`
+  if a newer app runs on an older launcher, so **always null-check appended services before calling**
+  (e.g. `touch_read`). Only bump `PAPP_ABI_VERSION` for an *incompatible* change — reordering,
+  removing, or changing the signature of an existing field — which forces every app to be rebuilt
+  (the loader rejects mismatched-version `.papp` headers, and each app checks `svc->abi_version`).
 
 ---
 

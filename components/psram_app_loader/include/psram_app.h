@@ -151,6 +151,23 @@ typedef struct {
     int (*fb_copy)(const uint16_t *src, uint16_t *dst,
                    uint32_t w, uint32_t h);
 
+    /* ────────────────────────────────────────────────────────────────
+     * APPEND-ONLY ZONE — added after ABI v1 shipped.
+     *
+     * New services are appended here, never inserted above, so existing
+     * .papp binaries keep their field offsets and run unchanged without
+     * a version bump. A new field may be NULL if an OLDER launcher loads
+     * a newer app, so touch-aware apps MUST null-check before calling:
+     *     if (svc->touch_read && svc->touch_read(&x, &y)) { ... }
+     * ──────────────────────────────────────────────────────────────── */
+
+    /* ── Touch (GT911) ───────────────────────────────────────────────── */
+    /* Read the capacitive touch panel. Coordinates are reported in
+     * LANDSCAPE native-framebuffer space — x in [0,799], y in [0,479],
+     * matching display_get_framebuffer(). Returns 1 if currently touched
+     * (and fills *x,*y), 0 if not. Either pointer may be NULL. */
+    int (*touch_read)(int *x, int *y);
+
 } app_services_t;
 
 /* ── Entry Point Signature ───────────────────────────────────────────── */
