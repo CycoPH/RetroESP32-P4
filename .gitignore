@@ -32,9 +32,11 @@ snes_header_check.bin
 temp_launcher_check.bin
 tmp_factory.bin
 
-# === Markdown docs (only README tracked) ===
+# === Markdown docs (README + published reference docs tracked; rest stay local) ===
 *.md
 !README.md
+!ARCHITECTURE.md
+!PAPP_GUIDE.md
 
 # === Backup directories ===
 backup_pre_superfx/
