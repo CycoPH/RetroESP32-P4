@@ -161,8 +161,8 @@ first field and must equal `PAPP_ABI_VERSION`.
 
 | Function | Signature | Purpose |
 |----------|-----------|---------|
-| `display_get_framebuffer` | `uint16_t *(void)` | Pointer to the native **800×480** RGB565 framebuffer |
-| `display_get_emu_buffer` | `uint16_t *(void)` | Pointer to the 320×240 emulator buffer |
+| `display_get_framebuffer` | `uint16_t *(void)` | Pointer to the native **800×480** RGB565 framebuffer (640×480 on HDMI) — draw here directly, no rotation |
+| `display_get_emu_buffer` | `uint16_t *(void)` | Pointer to the launcher's shared **320×240** emulator intermediate buffer (not your app's canvas — see §5) |
 | `display_flush` | `void(void)` | Flush the native FB (with rotate+scale) |
 | `display_emu_flush` | `void(void)` | Flush the emu buffer |
 | `display_clear` | `void(uint16_t color)` | Fill the screen with a solid RGB565 color |
@@ -190,7 +190,9 @@ Init once; then submit from your main loop or a dedicated audio task (see §6 fo
 | `input_gamepad_read` | `void(papp_gamepad_state_t *state)` | Fill `state.values[PAPP_INPUT_*]` (1 = pressed) |
 
 Buttons: `UP RIGHT DOWN LEFT SELECT START A B X Y L R MENU VOLUME` (prefix `PAPP_INPUT_`). By
-convention **MENU exits** the app.
+convention **MENU exits** the app. **There is no touch API** — the service table exposes only the
+gamepad. The GT911 touch driver exists in the launcher but is not wired into `app_services_t`;
+exposing it would be an ABI change (new fn pointer + `PAPP_ABI_VERSION` bump + rebuild).
 
 ### File I/O
 
@@ -257,8 +259,17 @@ how Quake gets its 256 KB stack. A FreeRTOS task **must never return** — loop 
 
 ## 5. Display Model
 
-The physical LCD is **480×800 portrait**. Apps normally draw into a **landscape** framebuffer and let
-the PPA hardware rotate + scale on flush:
+**Three buffers, don't confuse them:**
+- **Native framebuffer** — `display_get_framebuffer()`, **800×480** (640×480 HDMI). The real LCD
+  memory; draw here directly if you want no rotation.
+- **Emu intermediate buffer** — `display_get_emu_buffer()`, **320×240**. Launcher-owned, used by the
+  OTA emulator scaling pipeline. Available to apps, but usually not what you want.
+- **Your own canvas** — a buffer you allocate at whatever size suits you, submitted via
+  `display_write_frame_custom()`. This is the normal path for a PAPP. The template uses **400×240**
+  because at ×2.0 it fills the screen exactly (see below).
+
+The physical LCD is **480×800 portrait**. Apps normally draw into their own **landscape** canvas and
+let the PPA hardware rotate + scale on flush:
 
 ```
 W×H landscape FB  →  PPA rotate 270° CCW  →  H×W  →  scale ×N  →  fits 480×800 LCD
