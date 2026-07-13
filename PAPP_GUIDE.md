@@ -207,6 +207,11 @@ if (svc->touch_read && svc->touch_read(&tx, &ty)) {
 
 This null-check is the rule for **every service appended after v1** — see §7.
 
+> **Touch vs. MENU/VOLUME:** on the LCD board, `input_gamepad_read()` also synthesizes **MENU from
+> the top touch strip and VOLUME from the bottom strip** (`odroid_input.c`). So a touch app that quits
+> on `PAPP_INPUT_MENU` will exit the moment the user touches the top of the screen. **Touch apps
+> should exit on a physical button** (e.g. `PAPP_INPUT_X`) instead.
+
 ### File I/O
 
 Standard C-style wrappers over the launcher's VFS. Handles are opaque `void*` (a `FILE*` underneath).
