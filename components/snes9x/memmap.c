@@ -255,9 +255,21 @@ static char* Safe(const char* s)
 bool S9xInitMemory(void)
 {
 
-   Memory.RAM   = (uint8_t*) heap_caps_calloc(1, RAM_SIZE, MALLOC_CAP_SPIRAM);  //128 KB
-   Memory.SRAM  = (uint8_t*) heap_caps_calloc(1, SRAM_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);  // 128 KB -- DRAM for GSU framebuffer performance
-   Memory.VRAM  = (uint8_t*) heap_caps_calloc(1, VRAM_SIZE, MALLOC_CAP_SPIRAM);  // 64 KB
+   /* Buffer placement tuned for CPU speed (Phase 50):
+    *  - RAM (WRAM + 65816 stack) and VRAM are the hottest buffers → internal
+    *    SRAM (low latency). Fall back to PSRAM if internal RAM is exhausted.
+    *  - SRAM is cold battery-save data → PSRAM. It was internal only for the
+    *    SuperFX GSU framebuffer, which was removed (fxstub.c), so that fast RAM
+    *    is now free for WRAM/VRAM. */
+   Memory.RAM   = (uint8_t*) heap_caps_calloc(1, RAM_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);  // 128 KB WRAM (hot)
+   if (!Memory.RAM)
+      Memory.RAM = (uint8_t*) heap_caps_calloc(1, RAM_SIZE, MALLOC_CAP_SPIRAM);
+   Memory.SRAM  = (uint8_t*) heap_caps_calloc(1, SRAM_SIZE, MALLOC_CAP_SPIRAM);  // 128 KB battery save (cold)
+   Memory.VRAM  = (uint8_t*) heap_caps_calloc(1, VRAM_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);  // 64 KB (hot)
+   if (!Memory.VRAM)
+      Memory.VRAM = (uint8_t*) heap_caps_calloc(1, VRAM_SIZE, MALLOC_CAP_SPIRAM);
+   printf("SNES MEM: RAM=%p VRAM=%p SRAM=%p (P4 internal SRAM ~0x4FFxxxxx, PSRAM 0x48xxxxxx)\n",
+          Memory.RAM, Memory.VRAM, Memory.SRAM);
 // allocated when actually loading the ROM
 //   Memory.ROM   = (uint8_t*) heap_caps_calloc(1, MAX_ROM_SIZE + 0x200, MALLOC_CAP_SPIRAM);
    Memory.FillRAM = (uint8_t*) malloc(0x8000);  // 32 KB
