@@ -12,7 +12,13 @@
 #include "srtc.h"
 #include "soundux.h"
 
-static const char header[16] = "SNES9X_000000003";
+/* Version 004: bumped after the WRAM/VRAM/SRAM allocation-placement change
+ * (Phase 50). States written by an older build serialized APU/CPU pointers
+ * relative to the OLD IAPU.RAM/buffer addresses; the load-time rebase doesn't
+ * fully cover the new layout, so loading an old state crashed on resume.
+ * Bumping the version makes S9xLoadState reject incompatible states cleanly
+ * (header mismatch → return false → fresh boot) instead of crashing. */
+static const char header[16] = "SNES9X_000000004";
 
 /* Write helper — returns false on error */
 static bool wr(FILE *f, const void *data, size_t len)

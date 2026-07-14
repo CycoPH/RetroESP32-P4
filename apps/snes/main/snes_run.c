@@ -852,7 +852,9 @@ void snes_run(const char *rom_path)
     }
     snes_fb_write = 0;
 
-    /* SubScreen buffer — needed for color math and OBJ processing */
+    /* SubScreen buffer — needed for color math and OBJ processing.
+     * Kept in PSRAM: internal SRAM has no room for it after WRAM+VRAM (~192 KB),
+     * and pushing it internal starves the APU init (S9xInitAPU) → crash. */
     snes_subscreen = (uint8_t *)heap_caps_calloc(1,
         SNES_FB_W * SNES_FB_H_EXT * sizeof(uint16_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -1022,6 +1024,12 @@ void snes_run(const char *rom_path)
             snes_do_load_state();
         }
     }
+
+    /* Report memory headroom after all allocations (Phase 50 tuning) */
+    printf("SNES HEAP: internal free=%u B (largest block=%u B), PSRAM free=%u B\n",
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     /* ── Emulation loop ── */
     int frame_no = 0;
