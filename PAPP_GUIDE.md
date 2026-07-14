@@ -134,6 +134,11 @@ The file lands at **`/sd/roms/papp/MyApp.papp`** and shows up in the launcher's 
 Select it to run. (You can also just copy the `.papp` onto the SD card directly.) A `<AppName>.png`
 next to the `.papp` is shown as the carousel preview.
 
+**Also commit it to the repo's SD staging folder:** copy the built `.papp` to
+`SDcard/roms/papp/<AppName>.papp` and commit it. `SDcard/` is the git-tracked mirror of the physical
+SD card — it's how PAPPs ship with the repo (doom/quake/opentyrian/duke3d live there). Uploading to
+the device alone doesn't distribute it.
+
 > **SD path:** the launcher browses `/sd/roms/papp/`. Some older comments/scripts say `/sd/apps/` —
 > that's stale; use `/sd/roms/papp/`.
 
