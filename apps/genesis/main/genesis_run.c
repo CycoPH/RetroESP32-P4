@@ -55,6 +55,7 @@ static const char *TAG = "GENESIS_RUN";
 
 static void genesis_blit_sidebar_buttons(void);
 #define TARGET_FPS        60
+#define GEN_MAX_FRAMESKIP 3   /* max consecutive render-skips to hold 60 FPS game speed */
 
 /* Audio buffer length — max of NTSC/PAL */
 #define AUDIO_BUF_LEN     1056     /* GWENESIS_AUDIO_BUFFER_LENGTH_PAL */
@@ -128,12 +129,9 @@ static TaskHandle_t  audioTaskHandle;
 #define AUD_QUEUE_DEPTH 2
 static int16_t *audio_dma_buf[AUD_QUEUE_DEPTH] = { NULL, NULL };
 
-/* Audio synthesis on Core 1 — sync */
+/* Audio synthesis on Core 1 — decoupled, no cross-core wait */
 static volatile int audio_target_clock = 0;
-static SemaphoreHandle_t audio_done_sem = NULL;
 
-/* Frame skip — start conservative, can be tuned */
-static int frameskip  = 2;    /* render 1 of every N frames */
 
 /* Scanline loop state — scan_line must be non-static (extern'd by core) */
 static int system_clock;
@@ -349,7 +347,6 @@ static void genesis_video_task(void *arg)
  * yields ~19,536 samples/sec vs 22,050 I2S → small surplus absorbed by
  * the DMA buffer without blocking.
  */
-#define GEN_I2S_RATE   22050      /* I2S output rate — half native */
 
 static void genesis_audio_task(void *arg)
 {
@@ -360,13 +357,17 @@ static void genesis_audio_task(void *arg)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (genesis_quit_flag) break;
 
+        /* Reset audio index/clock for this frame HERE (moved from the main
+         * loop). These counters are used only by this task, so the main loop no
+         * longer has to block on audio_done_sem — this task runs fully decoupled
+         * on Core 1 (Neo Geo style), so Core 0 never waits for synthesis. */
+        sn76489_clock = 0; sn76489_index = 0;
+        ym2612_clock  = 0; ym2612_index  = 0;
+
         /* ── Run audio synthesis on Core 1 ── */
         int target = audio_target_clock;
         gwenesis_SN76489_run(target);
         ym2612_run(target);
-
-        /* Signal that synthesis is done (safe to reset clocks) */
-        xSemaphoreGive(audio_done_sem);
 
         /* ── Mix SN76489 + YM2612 and downsample 2:1 ── */
         int audio_len = sn76489_index > ym2612_index ? sn76489_index : ym2612_index;
@@ -983,10 +984,15 @@ void genesis_run(const char *rom_path)
     /* ── Set initial VDP framebuffer ── */
     gwenesis_vdp_set_buffer(gen_fb[0]);
 
-    /* ── Audio init ── */
-    odroid_audio_init(GEN_I2S_RATE);
+    /* ── Audio init ──
+     * I2S = native synth rate / 2 (matches the 2:1 downsample) so that, now the
+     * game is paced to real-time 60/50 FPS, audio output matches real time —
+     * correct pitch AND it no longer throttles the frame rate. (Was a fixed
+     * 22050 Hz, a slow-motion crutch that pinned Genesis at ~49 FPS.) */
+    int gen_i2s_rate = (REG1_PAL ? GWENESIS_AUDIO_FREQ_PAL : GWENESIS_AUDIO_FREQ_NTSC) / 2;
+    odroid_audio_init(gen_i2s_rate);
     ESP_LOGI(TAG, "Audio: synth=%d Hz, I2S=%d Hz (2:1 downsample)",
-             REG1_PAL ? GWENESIS_AUDIO_FREQ_PAL : GWENESIS_AUDIO_FREQ_NTSC, GEN_I2S_RATE);
+             REG1_PAL ? GWENESIS_AUDIO_FREQ_PAL : GWENESIS_AUDIO_FREQ_NTSC, gen_i2s_rate);
 
     /* ── Pre-render sidebar buttons ── */
 #ifndef CONFIG_HDMI_OUTPUT
@@ -1003,17 +1009,17 @@ void genesis_run(const char *rom_path)
     xTaskCreatePinnedToCore(genesis_video_task, "gen_video", 4096,
                             NULL, 5, &videoTaskHandle, 1);
 
-    /* ── Create audio task ── */
-    audio_done_sem = xSemaphoreCreateBinary();
-    xSemaphoreGive(audio_done_sem);  /* First frame doesn't wait */
+    /* ── Create audio task (fully decoupled — no done-semaphore) ── */
     xTaskCreatePinnedToCore(genesis_audio_task, "gen_audio", 4096,
                             NULL, 6, &audioTaskHandle, 1);
 
     /* ── Emulation loop ── */
     int64_t fps_timer = esp_timer_get_time();
-    int64_t frame_timer = esp_timer_get_time();
     const int64_t target_frame_us = REG1_PAL ? 20000 : 16667;
     int frame_no = 0;
+    int64_t frame_deadline = esp_timer_get_time() + target_frame_us;  /* real-time schedule */
+    bool draw_next = true;   /* pacer decides whether to render each frame */
+    int consec_skips = 0;
 
     /* Profiling */
     int64_t prof_cpu_acc = 0, prof_aud_acc = 0, prof_vid_acc = 0;
@@ -1033,7 +1039,8 @@ void genesis_run(const char *rom_path)
         if (gp.values[ODROID_INPUT_VOLUME] && !gp_prev.values[ODROID_INPUT_VOLUME]) {
             genesis_show_volume();
             fps_timer = esp_timer_get_time();
-            frame_timer = esp_timer_get_time();
+            frame_deadline = esp_timer_get_time() + target_frame_us;
+            consec_skips = 0;
             frame_no = 0;
         }
 
@@ -1043,7 +1050,8 @@ void genesis_run(const char *rom_path)
                 break;
             }
             fps_timer = esp_timer_get_time();
-            frame_timer = esp_timer_get_time();
+            frame_deadline = esp_timer_get_time() + target_frame_us;
+            consec_skips = 0;
             frame_no = 0;
         }
 
@@ -1073,7 +1081,7 @@ void genesis_run(const char *rom_path)
 
         /* ── Run one Genesis frame ── */
 
-        bool drawFrame = (frame_counter % frameskip) == 0;
+        bool drawFrame = draw_next;   /* set by the real-time pacer below */
 
         int lines_per_frame = REG1_PAL ? LINES_PER_FRAME_PAL : LINES_PER_FRAME_NTSC;
         int hint_counter = gwenesis_vdp_regs[10];
@@ -1083,17 +1091,11 @@ void genesis_run(const char *rom_path)
 
         gwenesis_vdp_render_config();
 
-        /* Wait for audio task to finish synthesis before resetting clocks */
-        xSemaphoreTake(audio_done_sem, pdMS_TO_TICKS(20));
-
-        /* Reset clocks */
+        /* Reset the emulation clocks. The audio index/clock counters are reset
+         * by the audio task itself now, so the main loop no longer waits on
+         * audio_done_sem — Core 0 runs free while Core 1 synthesizes. */
         system_clock = 0;
         zclk = 0;
-
-        ym2612_clock = 0;
-        ym2612_index = 0;
-        sn76489_clock = 0;
-        sn76489_index = 0;
 
         int64_t t0 = esp_timer_get_time();
 
@@ -1191,17 +1193,31 @@ void genesis_run(const char *rom_path)
         prof_cnt++;
         if (!drawFrame) prof_skip++;
 
-        /* Frame pacing */
+        /* ── Real-time pacing + CPU-based frame-skip ──
+         * Genesis renders a frame in well under the budget, so it holds a true
+         * 60 FPS by rendering EVERY frame and pacing (sleeping) to the deadline.
+         * Skip a render only when the frame's own CPU work (t1-t0) genuinely
+         * overruns — NOT on wall-clock lag: here the lag is dominated by the
+         * cross-core wait for the Core-1 audio task, which skipping can't fix and
+         * in fact worsens (skip → Core 0 outruns audio → longer wait → more skip).
+         * Always sleeping to the deadline also gives the audio task time to
+         * finish, so the semaphore wait stays ~0. */
         frame_counter++;
         frame_no++;
 
-        int64_t elapsed = t3 - frame_timer;
-        frame_timer = t3;
+        draw_next = ((t1 - t0) <= target_frame_us) || (consec_skips >= GEN_MAX_FRAMESKIP);
+        if (draw_next) consec_skips = 0; else consec_skips++;
 
-        if (elapsed < target_frame_us) {
-            int sleep_us = (int)(target_frame_us - elapsed);
-            if (sleep_us > 500)
-                vTaskDelay(pdMS_TO_TICKS(sleep_us / 1000));
+        frame_deadline += target_frame_us;
+        int64_t pnow = esp_timer_get_time();
+        if (pnow < frame_deadline) {
+            /* Ahead of schedule → wait to the deadline (holds 60, feeds audio) */
+            int64_t d;
+            while ((d = frame_deadline - esp_timer_get_time()) > 0) {
+                if (d > 1500) vTaskDelay(1);          /* yield ~1ms; else spin final <1.5ms */
+            }
+        } else if ((pnow - frame_deadline) > target_frame_us) {
+            frame_deadline = pnow;                    /* way behind (heavy) → resync */
         }
 
         /* ── FPS log (every ~2 seconds) ── */
@@ -1249,8 +1265,6 @@ void genesis_run(const char *rom_path)
 
     vQueueDelete(vidQueue);
     vidQueue = NULL;
-
-    if (audio_done_sem) { vSemaphoreDelete(audio_done_sem); audio_done_sem = NULL; }
 
     odroid_audio_terminate();
 
