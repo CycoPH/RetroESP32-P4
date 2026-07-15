@@ -52,6 +52,7 @@ static const char *TAG = "SNES_RUN";
 #define AUDIO_SAMPLE_RATE 32000
 #define AUDIO_FRAG_SIZE   512
 #define TARGET_FPS        60
+#define SNES_MAX_FRAMESKIP 3   /* max consecutive render-skips to hold 60 FPS game speed */
 
 /* ─── Globals required by snes9x core ──────────────────────────── */
 bool overclock_cycles = false;
@@ -1058,10 +1059,9 @@ void snes_run(const char *rom_path)
     /* ── Emulation loop ── */
     int frame_no = 0;
     int64_t fps_timer = esp_timer_get_time();
-    int32_t framedrop_balance = 0;
-    int64_t frame_timer = esp_timer_get_time();
     const int64_t target_frame_us = Settings.PAL ? 20000 : 16667;
-    int64_t next_deadline = esp_timer_get_time() + target_frame_us;
+    int64_t frame_deadline = esp_timer_get_time() + target_frame_us;  /* real-time schedule */
+    int consec_skips = 0;
 
     IPPU.RenderThisFrame = true;
 
@@ -1088,8 +1088,8 @@ void snes_run(const char *rom_path)
             snes_show_volume();
             snes_audio_resync = true;
             fps_timer = esp_timer_get_time();
-            frame_timer = esp_timer_get_time();
-            framedrop_balance = 0;
+            frame_deadline = esp_timer_get_time() + target_frame_us;
+            consec_skips = 0;
         }
 
         if (gp.values[ODROID_INPUT_MENU] && !gp_prev.values[ODROID_INPUT_MENU]) {
@@ -1100,8 +1100,8 @@ void snes_run(const char *rom_path)
             /* After resume, re-seed timers */
             snes_audio_resync = true;
             fps_timer = esp_timer_get_time();
-            frame_timer = esp_timer_get_time();
-            framedrop_balance = 0;
+            frame_deadline = esp_timer_get_time() + target_frame_us;
+            consec_skips = 0;
             frame_no = 0;
         }
 
@@ -1136,19 +1136,31 @@ void snes_run(const char *rom_path)
         prof_cnt++;
         if (!IPPU.RenderThisFrame) prof_skip++;
 
-        /* Frame-drop logic */
-        IPPU.RenderThisFrame = true;
+        /* ── Real-time pacing + auto frame-skip (Neo Geo style) ──
+         * Advance the game logic at a true 60 FPS vs. the wall clock. When a
+         * rendered frame overruns, SKIP rendering the next frame(s) to catch
+         * back up — the game keeps advancing, only the display drops frames.
+         * A render-skipped frame is well under budget, so this holds full game
+         * speed (and, since audio is frame-locked, real-time audio) except in
+         * the very heaviest scenes, where it resyncs and lets the game slow. */
+        IPPU.RenderThisFrame = true;                  /* default: render next frame */
+        frame_deadline += target_frame_us;
         int64_t now = esp_timer_get_time();
-        framedrop_balance += (int32_t)((now - frame_timer) - target_frame_us);
-        frame_timer = now;
-
-        if (framedrop_balance < 1000)
-            framedrop_balance = 0;
-
-        if (framedrop_balance > target_frame_us) {
-            IPPU.RenderThisFrame = false;
-            framedrop_balance -= target_frame_us;
+        if (now < frame_deadline) {
+            /* On/ahead of schedule → wait to the deadline (holds 60 FPS) */
+            int64_t d;
+            while ((d = frame_deadline - esp_timer_get_time()) > 0) {
+                if (d > 1500) vTaskDelay(1);          /* yield ~1ms; else spin final <1.5ms */
+            }
+            consec_skips = 0;
+        } else if (consec_skips < SNES_MAX_FRAMESKIP) {
+            IPPU.RenderThisFrame = false;             /* behind → skip next render to catch up */
+            consec_skips++;
+        } else {
+            frame_deadline = now;                     /* can't keep up even skipping → slow down */
+            consec_skips = 0;
         }
+        now = esp_timer_get_time();                   /* real frame-end time for the FPS calc */
 
         /* FPS + profiling log (every ~2 seconds) */
         frame_no++;
@@ -1207,25 +1219,6 @@ void snes_run(const char *rom_path)
             prof_cnt = prof_skip = 0;
             frame_no = 0;
             fps_timer = now;
-        }
-
-        /* ── Frame-rate cap to ~60 FPS ──
-         * The loop is otherwise uncapped, so light scenes run FASTER than real
-         * time (fast-forward) and the real-time audio drifts out of sync. Hold
-         * each frame to target_frame_us so the game runs at true speed whenever
-         * it can — real-time audio then stays in sync. Only waits when ahead;
-         * heavy (already-slow) scenes pass straight through. */
-        for (;;) {
-            int64_t d = next_deadline - esp_timer_get_time();
-            if (d <= 0) break;
-            if (d > 1500) vTaskDelay(1);   /* yield ~1ms (feeds WDT, tick=1kHz) */
-            /* else busy-wait the final <1.5ms for precision */
-        }
-        next_deadline += target_frame_us;
-        {
-            int64_t cap_now = esp_timer_get_time();
-            if (next_deadline < cap_now)   /* fell behind (heavy scene) → resync */
-                next_deadline = cap_now + target_frame_us;
         }
     }
 
