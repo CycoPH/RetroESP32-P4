@@ -82,6 +82,14 @@ static int16_t *audio_dma_buf[AUD_QUEUE_DEPTH] = { NULL, NULL };
 /* Audio buffer (mixing — used by audio task on Core 1) */
 static int16_t *audio_buf = NULL;
 
+/* Coherent audio (Phase 50): the DSP advances exactly one emulated frame
+ * (FRAME_SRC samples) per frame — locked to the SPC700 — then is time-stretched
+ * to real time so game + sound stay in sync and the I2S never underruns. With
+ * the 60 FPS cap the stretch is 1:1 at 60 FPS, up to ~60/46 in heavy scenes. */
+#define FRAME_SRC    (AUDIO_SAMPLE_RATE / TARGET_FPS)   /* 533 stereo frames / emulated frame */
+#define AUD_OUT_MAX  800                                 /* max stretched output frames */
+static int16_t *coherent_buf = NULL;                     /* FRAME_SRC frames from MixStereo */
+
 /* ─── snes9x platform callbacks ─────────────────────────────────── */
 
 /* Pristine copies of GFX buffer pointers — defined in gfx.c, used to
@@ -223,49 +231,58 @@ static void snes_audio_task(void *arg)
 {
     audioTaskRunning = true;
     int dma_idx = 0;
-    /* Wall-clock based sample counting — avoids underruns when FPS < 60.
-     * Track cumulative samples that *should* have been produced by now
-     * vs. how many we actually produced, and mix the difference each frame. */
+    /* Coherent audio: each emulated frame, mix exactly FRAME_SRC samples so the
+     * DSP advances one frame in lockstep with the SPC700 (no drift vs. the game),
+     * then time-stretch that to the real-time sample count so the I2S stays fed.
+     * Sound and video stay in sync; in sub-60 scenes the whole thing (audio too)
+     * runs mildly slow together instead of the audio drifting ahead. */
     int64_t audio_start_time = esp_timer_get_time();
-    int64_t samples_produced = 0;
+    int64_t samples_produced = 0;   /* real-time output samples fed to I2S */
 
     while (1) {
-        /* Wait for signal from emu loop that a frame is ready to mix */
+        /* Wait for the emu loop's per-frame signal */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (snes_quit_flag) break;
 
-        /* Re-sync time base after menu/pause to avoid massive catch-up burst */
         if (snes_audio_resync) {
             snes_audio_resync = false;
             audio_start_time = esp_timer_get_time();
             samples_produced = 0;
         }
 
-        /* Compute how many total samples should exist by now */
-        int64_t now = esp_timer_get_time();
-        int64_t elapsed_us = now - audio_start_time;
-        int64_t target_samples = (elapsed_us * AUDIO_SAMPLE_RATE) / 1000000;
-        int remaining = (int)(target_samples - samples_produced);
+        /* 1. Produce exactly ONE emulated frame of DSP audio (coherent). */
+        S9xMixSamples(coherent_buf, FRAME_SRC * 2);
 
-        /* Clamp: don't go negative, and cap at 2 frames worth to avoid
-         * massive catch-up bursts after pauses (menu, save/load) */
-        if (remaining <= 0) remaining = 0;
-        if (remaining > (AUDIO_SAMPLE_RATE / TARGET_FPS) * 2) {
-            remaining = (AUDIO_SAMPLE_RATE / TARGET_FPS) * 2;
-            /* Re-sync time base to avoid permanent drift */
+        /* 2. Real-time output count (wall clock) so the I2S never underruns. */
+        int64_t now = esp_timer_get_time();
+        int64_t target = ((now - audio_start_time) * AUDIO_SAMPLE_RATE) / 1000000;
+        int out_n = (int)(target - samples_produced);
+        if (out_n < FRAME_SRC) out_n = FRAME_SRC;   /* 60 FPS-capped: usual path */
+        if (out_n > AUD_OUT_MAX) {                   /* clamp catch-up burst (post-pause) */
+            out_n = AUD_OUT_MAX;
             audio_start_time = now - (samples_produced * 1000000 / AUDIO_SAMPLE_RATE);
         }
 
-        /* Mix + submit audio on Core 1 — frees Core 0 from ~1ms work */
-        while (remaining > 0) {
-            int n = (remaining < AUDIO_FRAG_SIZE) ? remaining : AUDIO_FRAG_SIZE;
-            int16_t *dest = audio_dma_buf[dma_idx];
-            S9xMixSamples(dest, n * 2);  /* stereo: n*2 int16_t */
-            odroid_audio_submit(dest, n);
-            samples_produced += n;
-            dma_idx = (dma_idx + 1) % AUD_QUEUE_DEPTH;
-            remaining -= n;
+        /* 3. Time-stretch FRAME_SRC coherent frames -> out_n output frames
+         *    (linear interpolation, stereo). out_n >= FRAME_SRC, so this only
+         *    ever stretches (mild slow-down), never compresses. */
+        int16_t *dest = audio_dma_buf[dma_idx];
+        if (out_n == FRAME_SRC) {
+            memcpy(dest, coherent_buf, FRAME_SRC * 4);
+        } else {
+            float ratio = (float)(FRAME_SRC - 1) / (float)(out_n - 1);
+            for (int i = 0; i < out_n; i++) {
+                float sp = i * ratio;
+                int   i0 = (int)sp;
+                float fr = sp - i0;
+                int   i1 = (i0 + 1 < FRAME_SRC) ? i0 + 1 : i0;
+                dest[i*2]   = (int16_t)(coherent_buf[i0*2]   + (int)((coherent_buf[i1*2]   - coherent_buf[i0*2])   * fr));
+                dest[i*2+1] = (int16_t)(coherent_buf[i0*2+1] + (int)((coherent_buf[i1*2+1] - coherent_buf[i0*2+1]) * fr));
+            }
         }
+        odroid_audio_submit(dest, out_n);
+        samples_produced += out_n;
+        dma_idx = (dma_idx + 1) % AUD_QUEUE_DEPTH;
     }
 
     audioTaskRunning = false;
@@ -871,14 +888,21 @@ void snes_run(const char *rom_path)
         goto cleanup;
     }
 
-    /* Audio DMA double-buffers — sent to audio task on Core 1 */
+    /* Audio DMA double-buffers — sized for the max stretched output */
     for (int i = 0; i < AUD_QUEUE_DEPTH; i++) {
-        audio_dma_buf[i] = (int16_t *)heap_caps_malloc(AUDIO_FRAG_SIZE * 4,
+        audio_dma_buf[i] = (int16_t *)heap_caps_malloc(AUD_OUT_MAX * 4,
             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (!audio_dma_buf[i]) {
             ESP_LOGE(TAG, "Failed to allocate audio DMA buffer %d", i);
             goto cleanup;
         }
+    }
+
+    /* Coherent-mix source — one emulated frame of DSP output (not DMA → PSRAM) */
+    coherent_buf = (int16_t *)heap_caps_malloc(FRAME_SRC * 4, MALLOC_CAP_SPIRAM);
+    if (!coherent_buf) {
+        ESP_LOGE(TAG, "Failed to allocate coherent audio buffer");
+        goto cleanup;
     }
 
     /* ── Initialize snes9x core ── */
@@ -1037,6 +1061,7 @@ void snes_run(const char *rom_path)
     int32_t framedrop_balance = 0;
     int64_t frame_timer = esp_timer_get_time();
     const int64_t target_frame_us = Settings.PAL ? 20000 : 16667;
+    int64_t next_deadline = esp_timer_get_time() + target_frame_us;
 
     IPPU.RenderThisFrame = true;
 
@@ -1183,6 +1208,25 @@ void snes_run(const char *rom_path)
             frame_no = 0;
             fps_timer = now;
         }
+
+        /* ── Frame-rate cap to ~60 FPS ──
+         * The loop is otherwise uncapped, so light scenes run FASTER than real
+         * time (fast-forward) and the real-time audio drifts out of sync. Hold
+         * each frame to target_frame_us so the game runs at true speed whenever
+         * it can — real-time audio then stays in sync. Only waits when ahead;
+         * heavy (already-slow) scenes pass straight through. */
+        for (;;) {
+            int64_t d = next_deadline - esp_timer_get_time();
+            if (d <= 0) break;
+            if (d > 1500) vTaskDelay(1);   /* yield ~1ms (feeds WDT, tick=1kHz) */
+            /* else busy-wait the final <1.5ms for precision */
+        }
+        next_deadline += target_frame_us;
+        {
+            int64_t cap_now = esp_timer_get_time();
+            if (next_deadline < cap_now)   /* fell behind (heavy scene) → resync */
+                next_deadline = cap_now + target_frame_us;
+        }
     }
 
     /* ── Shutdown ── */
@@ -1222,6 +1266,7 @@ cleanup:
     }
     if (snes_subscreen) { heap_caps_free(snes_subscreen); snes_subscreen = NULL; }
     if (audio_buf) { heap_caps_free(audio_buf); audio_buf = NULL; }
+    if (coherent_buf) { heap_caps_free(coherent_buf); coherent_buf = NULL; }
     for (int i = 0; i < AUD_QUEUE_DEPTH; i++) {
         if (audio_dma_buf[i]) { heap_caps_free(audio_dma_buf[i]); audio_dma_buf[i] = NULL; }
     }
