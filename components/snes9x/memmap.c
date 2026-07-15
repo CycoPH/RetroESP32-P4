@@ -251,30 +251,34 @@ static char* Safe(const char* s)
 /**********************************************************************************************/
 /* S9xInitMemory()                                                                                     */
 /* This function allocates and zeroes all the memory needed by the emulator                   */
+/*                                                                                            */
+/* NOTE: This is the LIVE copy (inside `#ifdef NO_PSRAM`, compiled on ESP32-P4). There is a   */
+/* SECOND, DEAD copy of S9xInitMemory further down in the `#else` branch — keep buffer-       */
+/* placement edits here. TODO: de-dup the two copies (Phase 50 note).                         */
 /**********************************************************************************************/
 bool S9xInitMemory(void)
 {
 
    /* Buffer placement tuned for CPU speed (Phase 50):
-    *  - RAM (WRAM + 65816 stack) is the single hottest buffer (touched on
-    *    nearly every instruction) → internal SRAM. Fall back to PSRAM if
-    *    internal RAM is exhausted.
-    *  - SRAM is cold battery-save data → PSRAM (was internal only for the
-    *    removed SuperFX GSU framebuffer).
-    *  - VRAM stays in PSRAM: with WRAM internal there is only ~17 KB of
-    *    internal SRAM left; pushing VRAM (64 KB) internal too leaves no margin
-    *    for runtime allocations (crashes/artifacts). VRAM in PSRAM (cached)
-    *    costs very little vs. the stability margin it frees (~80 KB). */
+    *  - RAM (WRAM + 65816 stack) — hottest, touched nearly every instruction → internal.
+    *  - VRAM — read every scanline during rendering (render-heavy scenes are
+    *    VRAM-bound) → internal. To keep an internal-SRAM safety margin, FillRAM
+    *    (32 KB, below) moves to PSRAM to make room, leaving ~50 KB free.
+    *  - SRAM — cold battery save → PSRAM (was internal only for the removed
+    *    SuperFX GSU framebuffer).
+    * Hot buffers fall back to PSRAM if internal RAM is exhausted. */
    Memory.RAM   = (uint8_t*) heap_caps_calloc(1, RAM_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);  // 128 KB WRAM (hot)
    if (!Memory.RAM)
       Memory.RAM = (uint8_t*) heap_caps_calloc(1, RAM_SIZE, MALLOC_CAP_SPIRAM);
    Memory.SRAM  = (uint8_t*) heap_caps_calloc(1, SRAM_SIZE, MALLOC_CAP_SPIRAM);  // 128 KB battery save (cold)
-   Memory.VRAM  = (uint8_t*) heap_caps_calloc(1, VRAM_SIZE, MALLOC_CAP_SPIRAM);  // 64 KB (PSRAM — keep margin)
+   Memory.VRAM  = (uint8_t*) heap_caps_calloc(1, VRAM_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);  // 64 KB (hot, render)
+   if (!Memory.VRAM)
+      Memory.VRAM = (uint8_t*) heap_caps_calloc(1, VRAM_SIZE, MALLOC_CAP_SPIRAM);
    printf("SNES MEM: RAM=%p VRAM=%p SRAM=%p (P4 internal SRAM ~0x4FFxxxxx, PSRAM 0x48xxxxxx)\n",
           Memory.RAM, Memory.VRAM, Memory.SRAM);
 // allocated when actually loading the ROM
 //   Memory.ROM   = (uint8_t*) heap_caps_calloc(1, MAX_ROM_SIZE + 0x200, MALLOC_CAP_SPIRAM);
-   Memory.FillRAM = (uint8_t*) malloc(0x8000);  // 32 KB
+   Memory.FillRAM = (uint8_t*) heap_caps_malloc(0x8000, MALLOC_CAP_SPIRAM);  // 32 KB → PSRAM (frees internal for VRAM)
 
    IPPU.TileCache = (uint8_t*) heap_caps_calloc(1, MAX_2BIT_TILES * 2, MALLOC_CAP_INTERNAL);  // 8KB 128 fcipaq
    IPPU.TileCached = (uint8_t*) heap_caps_calloc(1, MAX_2BIT_TILES, MALLOC_CAP_INTERNAL);  // 4KB
@@ -2469,6 +2473,12 @@ static char* Safe(const char* s)
 /**********************************************************************************************/
 /* S9xInitMemory()                                                                                     */
 /* This function allocates and zeroes all the memory needed by the emulator                   */
+/*                                                                                            */
+/* !!! DUPLICATE / DEAD CODE !!!  This is the `#else` (NO_PSRAM undefined) copy of            */
+/* S9xInitMemory. On this ESP32-P4 build the FIRST copy (top of file, inside `#ifdef          */
+/* NO_PSRAM`) is the one that compiles — verified: its "SNES MEM:" printf runs on device.     */
+/* Edit the FIRST copy, not this one. Buffer-placement tuning lives there. TODO: de-dup       */
+/* these two S9xInitMemory bodies (Phase 50 note).                                            */
 /**********************************************************************************************/
 bool S9xInitMemory(void)
 {
