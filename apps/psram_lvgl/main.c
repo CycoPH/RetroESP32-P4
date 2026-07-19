@@ -43,6 +43,10 @@
 #define CANVAS_H      240
 #define CANVAS_SCALE  2.0f                 /* 400x240 * 2 -> 800x480          */
 #define TOUCH_DIV     2                    /* native -> canvas divisor        */
+
+/* Analog-wheel detection, matching the Atari cores' constants */
+#define PADDLE_SAMPLES        4
+#define PADDLE_DETECT_SPREAD  300          /* max ADC spread for a real pot   */
 #define CANVAS_PIXELS (CANVAS_W * CANVAS_H)
 #define CANVAS_BYTES  (CANVAS_PIXELS * (int)sizeof(uint16_t))
 
@@ -382,17 +386,38 @@ int app_entry(const app_services_t *svc)
      * even a current launcher returns -1 on the HDMI build, where no paddle
      * is wired. Either way we fall back to the touch-driven dial. */
     if (svc->paddle_read) {
-        /* Prime it: the first call initialises the ADC, and the reading is
-         * only refreshed inside input_gamepad_read(), so poll once here. */
+        /* The first call initialises the ADC. The reading itself is only
+         * refreshed inside input_gamepad_read(), so each sample must be
+         * preceded by an input poll. */
         (void)svc->paddle_read();
-        papp_gamepad_state_t warm;
-        svc->input_gamepad_read(&warm);
-        svc->delay_ms(20);
-        svc->input_gamepad_read(&warm);
-        int raw = svc->paddle_read();
-        g_have_wheel = (raw >= 0);
-        svc->log_printf("paddle probe: raw=%d -> wheel %s\n",
-                        raw, g_have_wheel ? "PRESENT" : "absent");
+
+        /* Floating-pin detection, mirroring the Atari cores
+         * (components/stella/stella_run.cpp, atari800_run.cpp):
+         * a REAL potentiometer sits at a steady voltage, so its samples
+         * barely move. A disconnected pin floats and picks up noise, so its
+         * samples scatter. Hence a SMALL spread means the pot is present --
+         * the opposite of the intuition that movement implies a real device. */
+        int lo = 4095, hi = 0, raw = -1;
+        for (int i = 0; i < PADDLE_SAMPLES; i++) {
+            papp_gamepad_state_t dummy;
+            svc->input_gamepad_read(&dummy);       /* triggers the ADC read */
+            raw = svc->paddle_read();
+            if (raw < 0) break;                    /* unavailable entirely   */
+            if (raw < lo) lo = raw;
+            if (raw > hi) hi = raw;
+            svc->delay_ms(5);
+        }
+
+        if (raw < 0) {
+            g_have_wheel = false;
+            svc->log_printf("paddle probe: unavailable (raw=-1)\n");
+        } else {
+            int spread = hi - lo;
+            g_have_wheel = (spread < PADDLE_DETECT_SPREAD);
+            svc->log_printf("paddle probe: lo=%d hi=%d spread=%d -> wheel %s\n",
+                            lo, hi, spread,
+                            g_have_wheel ? "PRESENT" : "absent (floating?)");
+        }
     } else {
         svc->log_printf("paddle probe: launcher has no paddle_read service\n");
     }
