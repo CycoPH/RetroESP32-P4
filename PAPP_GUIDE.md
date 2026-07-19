@@ -373,6 +373,8 @@ that memory → corruption.
 | `tools/pack_papp.py` | Wrap a flat `.bin` in the 32-byte `.papp` header |
 | `tools/upload_papp.py` | Push a `.papp` to `/sd/roms/papp/` over USB Serial JTAG |
 | `apps/psram_{opentyrian,doom,quake,duke3d}/` | Full port examples (shims, syscalls, compat headers) |
+| `apps/psram_lvgl/` | **LVGL + touch reference app** (see §9) |
+| `tools/build_lvgl_papp.ps1` | LVGL build (globs + caches ~276 LVGL objects, derives bss) |
 | `PSRAM_APP.md` | Implementation history, porting notes, resolved-bug log |
 
 ### Build flags (reference)
@@ -381,3 +383,123 @@ Compile: `-march=rv32imafc_zicsr_zifencei -mabi=ilp32f -mcmodel=medany -Os -ffun
 -fdata-sections -DPAPP_APP_SIDE=1 -I<psram_app.h dir>`.
 Link: `-nostartfiles -nostdlib -T tools/psram_app.ld -Wl,--gc-sections -Wl,--entry=app_entry
 -Wl,--no-relax` (complex apps add `-nodefaultlibs … -lc -lgcc -lm` and `--wrap=` for malloc family).
+
+---
+
+## 9. Case Study — LVGL v9 with touch (`apps/psram_lvgl`)
+
+A complete, working reference for running a real GUI toolkit inside a PAPP. Build it with:
+
+```powershell
+.\tools\build_lvgl_papp.ps1            # incremental (LVGL objects are cached)
+.\tools\build_lvgl_papp.ps1 -Clean     # full rebuild (~276 files, a few minutes)
+```
+
+LVGL itself is **not committed** (it is ~200 MB with history). Fetch it once:
+
+```powershell
+git clone --depth 1 -b release/v9.2 https://github.com/lvgl/lvgl.git third_party\lvgl
+```
+
+Result: `firmware\psram_lvgl.papp` — **310 KB code + 89 B data + 257 KB bss**, also auto-staged
+into `SDcard\roms\papp\`.
+
+### 9.1 The three things you must wire up
+
+| LVGL needs | We provide | Where |
+|------------|-----------|-------|
+| A display | `disp_flush_cb` → `svc->display_write_frame_custom()` | `main.c` |
+| An input device | `touch_read_cb` (pointer indev) → `svc->touch_read()` | `main.c` |
+| A millisecond tick | `lv_tick_set_cb(tick_cb)` → `svc->get_time_us()/1000` | `main.c` |
+
+Then it is just `lv_timer_handler()` in your main loop. Always call `lv_display_flush_ready()`
+at the end of the flush callback or LVGL stalls after one frame.
+
+### 9.2 Making LVGL survive `-nostdlib`
+
+LVGL is configured in `apps/psram_lvgl/lv_conf.h` to bring its **own** C library, so it needs no libc:
+
+```c
+#define LV_USE_STDLIB_MALLOC   LV_STDLIB_BUILTIN   /* tlsf on a static pool */
+#define LV_USE_STDLIB_STRING   LV_STDLIB_BUILTIN
+#define LV_USE_STDLIB_SPRINTF  LV_STDLIB_BUILTIN
+#define LV_USE_OS              LV_OS_NONE
+#define LV_USE_FLOAT           0                   /* avoids soft-double helpers */
+#define LV_MEM_SIZE            (256 * 1024U)       /* lives in .bss — see 9.3!  */
+```
+
+Two traps that will bite you:
+
+1. **GCC still emits `memset`/`memcpy` implicitly** (struct init, array copies) even though the
+   source never calls them. `apps/psram_lvgl/papp_libc.c` defines them. But that file **must** be
+   compiled with `-fno-tree-loop-distribute-patterns`, or GCC turns the byte loop inside your own
+   `memset()` into a call to `memset()` — infinite recursion. The build script passes it globally.
+2. **Link `-lgcc`.** It supplies helper routines (64-bit divide, etc.). It is safe here because the
+   linker script binds the app at its real runtime address (`0x4A000000`), so absolute addressing
+   inside libgcc resolves correctly.
+
+`-Wl,--no-warn-rwx-segments` just silences an expected notice: our flat image is one LOAD segment
+holding text+data, which `ld` flags as RWX.
+
+### 9.3 ⚠ The `.bss` trap (read this before shipping any large PAPP)
+
+`.bss` is `NOLOAD`, so it is **not** in the flat binary. The loader allocates `text + data + bss`
+and zeroes the bss region — **but only if the `.papp` header says how big `.bss` is.** Pack with
+`bss_size = 0` and the app writes past its own allocation and corrupts the heap. LVGL alone puts
+~256 KB there, so this is not a corner case.
+
+`build_lvgl_papp.ps1` derives it from the linker symbol (same method as `build_doom_papp.ps1`) and
+**refuses to pack** if it cannot:
+
+```powershell
+$bssEnd    = <address of _bss_end from riscv32-esp-elf-nm>
+$bssToZero = $bssEnd - (0x4A000000 + <flat binary size>)
+python tools\pack_papp.py $bin $papp --bss-size $bssToZero
+```
+
+Verify in the boot log — `load + bss` must land exactly on `_bss_end`:
+
+```
+Header OK: text=310025 data=0 bss=262695 entry_off=0
+App buffer: 0x48250000 (load=310025 bss=262695 total=572720)
+Executable mapping at: 0x4a000000     <- matches the link base
+```
+
+> The generic `tools/build_psram_app.ps1` does **not** pass `--bss-size`. That is fine for tiny apps
+> with no globals, but any app with meaningful static data must use a per-app script that does.
+
+### 9.4 Resolution and touch mapping
+
+The native framebuffer is **800×480 on LCD but 640×480 on HDMI**, and there is no "get framebuffer
+size" service. So a portable PAPP renders a **fixed 400×240 canvas** and lets the launcher scale it:
+
+```c
+svc->display_write_frame_custom(px_map, 400, 240, 2.0f, /*byte_swap=*/false);
+```
+
+400×240 × 2.0 maps exactly onto 800×480, letterboxes sensibly on HDMI, and is 4× less pixel work
+than native — which keeps LVGL's software renderer smooth. `svc->touch_read()` reports **native**
+coordinates, so the canvas mapping is simply `canvas = native / 2`.
+
+If colours ever look red/blue-swapped, flip the `byte_swap` flag.
+
+### 9.5 Gotchas specific to touch apps
+
+- **Exit on the physical `X` button, never `MENU`.** On the LCD board the launcher synthesizes
+  `MENU` from the top touch strip, so a MENU-to-exit app quits the moment you touch near the top.
+- **`touch_read` is in the ABI's append-only zone** — an older launcher may not have it. Null-check:
+  `if (!svc->touch_read) { ...bail... }`.
+- **Decorative overlays must not steal input.** The finger-follow dot calls
+  `lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE)`.
+
+### 9.6 Launching it
+
+`RUNR` (the serial launch protocol) only understands ROMs — it answers `ERR:unknown ext 'papp'`.
+Launch a PAPP from the launcher's **PAPP section** on the device. Give it a `300×300` PNG next to
+the binary (`psram_lvgl.png`) or the browser logs a missing-icon error.
+
+### 9.7 What the demo shows
+
+A touch-driven dashboard at 400×240: an interactive arc gauge, a slider bound to it, a live
+auto-scrolling chart, a bar, an on/off switch, a live FPS + free-heap readout, and a dot that
+follows your finger (the most direct proof the indev works).

@@ -67,3 +67,7 @@ __pycache__/
 
 # === Excel validation matrix (CSV is tracked) ===
 validation_matrix.xlsx
+
+# === Vendored third-party libraries (see docs/LVGL_PAPP.md to re-fetch) ===
+third_party/
+build_papp/

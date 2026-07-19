@@ -1,0 +1,372 @@
+/*
+ * ============================================================================
+ *  psram_lvgl — LVGL v9 running as a PSRAM app (.papp), with touch input.
+ * ============================================================================
+ *
+ *  This is a TRAINING REFERENCE. It shows the three things you must wire up to
+ *  get LVGL running inside a PAPP:
+ *
+ *    1. A DISPLAY   — LVGL renders into our own RGB565 canvas, which we hand to
+ *                     the launcher via svc->display_write_frame_custom().
+ *    2. AN INPUT    — an LVGL "pointer" indev backed by svc->touch_read().
+ *    3. A TICK      — LVGL needs a millisecond clock; we use svc->get_time_us().
+ *
+ *  ── Why a 400x240 canvas (and not the native framebuffer)? ─────────────────
+ *  The native framebuffer is 800x480 on the LCD build but 640x480 on the HDMI
+ *  build, and the service table has no "get framebuffer size" call. So a PAPP
+ *  that wants to run unmodified on BOTH targets should render a fixed-size
+ *  canvas and let display_write_frame_custom() scale it. 400x240 at scale 2.0
+ *  maps exactly onto 800x480 and is letterboxed sensibly on HDMI. It is also
+ *  4x less pixel work than native, which keeps LVGL's software renderer smooth.
+ *
+ *  ── Touch coordinate mapping ───────────────────────────────────────────────
+ *  svc->touch_read() reports LANDSCAPE NATIVE coordinates (x:0..799, y:0..479).
+ *  Our canvas is half that in each axis, so canvas = native / 2.
+ *
+ *  ── Exiting ────────────────────────────────────────────────────────────────
+ *  We exit on the PHYSICAL X button, never on MENU: on the LCD board the
+ *  launcher synthesizes MENU from the top touch strip, so a MENU-to-exit app
+ *  would quit the instant you touched near the top of the screen.
+ *
+ *  Build:  .\tools\build_lvgl_papp.ps1
+ *  Deploy: firmware\psram_lvgl.papp  ->  /sd/roms/papp/psram_lvgl.papp
+ * ============================================================================
+ */
+
+#define PAPP_APP_SIDE 1
+#include "psram_app.h"
+
+#include "lvgl.h"
+
+/* ── Canvas geometry ─────────────────────────────────────────────────────── */
+#define CANVAS_W      400
+#define CANVAS_H      240
+#define CANVAS_SCALE  2.0f                 /* 400x240 * 2 -> 800x480          */
+#define TOUCH_DIV     2                    /* native -> canvas divisor        */
+#define CANVAS_PIXELS (CANVAS_W * CANVAS_H)
+#define CANVAS_BYTES  (CANVAS_PIXELS * (int)sizeof(uint16_t))
+
+/* ── Palette (kept close to the launcher's own dark look) ────────────────── */
+#define COL_BG      0x101820
+#define COL_PANEL   0x1b2836
+#define COL_ACCENT  0x38bdf8   /* cyan   */
+#define COL_ACCENT2 0xf5c518   /* amber  */
+#define COL_OK      0x35c46a   /* green  */
+#define COL_TEXT    0xe6edf3
+#define COL_MUTED   0x7d8fa1
+
+/* ── Globals (a PAPP is single-instance, so file-scope state is fine) ─────── */
+static const app_services_t *g_svc;
+static uint16_t *g_canvas;                 /* LVGL renders here               */
+
+static lv_obj_t *g_arc, *g_arc_val, *g_stats, *g_chart, *g_bar, *g_touchdot;
+static lv_chart_series_t *g_ser;
+static bool g_feed_chart = true;
+static uint32_t g_frames, g_fps;
+
+/* ── Tiny PRNG (no libc rand() in a freestanding build) ──────────────────── */
+static uint32_t g_rng = 0x13579bdfu;
+static uint32_t rnd(void)
+{
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 17;
+    g_rng ^= g_rng << 5;
+    return g_rng;
+}
+
+/* ========================================================================== */
+/*  1. DISPLAY  — LVGL renders into g_canvas, we push it to the launcher      */
+/* ========================================================================== */
+/*
+ * With LV_DISPLAY_RENDER_MODE_FULL the draw buffer is screen-sized and LVGL
+ * hands us the whole canvas once all dirty areas have been redrawn — so we can
+ * simply push the entire buffer and ignore `area`.
+ *
+ * NOTE ON COLOUR ORDER: LVGL writes native RGB565 and the launcher's
+ * display_write_frame_custom() takes a `byte_swap` flag. We pass false, which
+ * matches the convention used by the other PAPPs (0xF800 == red). If colours
+ * ever come out inverted-looking (red<->blue), flip that flag.
+ */
+static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    (void)area;
+    g_svc->display_write_frame_custom((const uint16_t *)px_map,
+                                      CANVAS_W, CANVAS_H, CANVAS_SCALE, false);
+    g_frames++;
+    lv_display_flush_ready(disp);          /* MUST be called, or LVGL stalls  */
+}
+
+/* ========================================================================== */
+/*  2. INPUT  — an LVGL pointer device backed by the GT911 touch panel        */
+/* ========================================================================== */
+static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    (void)indev;
+    int tx, ty;
+
+    /* touch_read lives in the append-only zone of the ABI, so an older
+     * launcher may not provide it — app_entry() already null-checked it. */
+    if (g_svc->touch_read(&tx, &ty)) {
+        data->point.x = (lv_coord_t)(tx / TOUCH_DIV);
+        data->point.y = (lv_coord_t)(ty / TOUCH_DIV);
+        data->state   = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state   = LV_INDEV_STATE_RELEASED;   /* keep last point */
+    }
+}
+
+/* ========================================================================== */
+/*  3. TICK  — LVGL's millisecond time base                                   */
+/* ========================================================================== */
+static uint32_t tick_cb(void)
+{
+    return (uint32_t)(g_svc->get_time_us() / 1000);
+}
+
+/* ── Event handlers ──────────────────────────────────────────────────────── */
+
+/* Slider drives the arc gauge (and its centre label). */
+static void slider_cb(lv_event_t *e)
+{
+    lv_obj_t *sl = lv_event_get_target_obj(e);
+    int32_t v = lv_slider_get_value(sl);
+    lv_arc_set_value(g_arc, v);
+    lv_label_set_text_fmt(g_arc_val, "%d", (int)v);
+    lv_bar_set_value(g_bar, v, LV_ANIM_ON);
+}
+
+/* Dragging the arc directly updates its own label. */
+static void arc_cb(lv_event_t *e)
+{
+    lv_obj_t *a = lv_event_get_target_obj(e);
+    lv_label_set_text_fmt(g_arc_val, "%d", (int)lv_arc_get_value(a));
+}
+
+/* Switch pauses/resumes the live chart. */
+static void sw_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target_obj(e);
+    g_feed_chart = lv_obj_has_state(sw, LV_STATE_CHECKED);
+}
+
+/* ── Periodic timer: feeds the chart and refreshes the stats readout ─────── */
+static void tick_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    static uint32_t last_ms;
+    static int32_t  y = 50;
+
+    if (g_feed_chart) {
+        y += (int32_t)(rnd() % 21) - 10;          /* random walk, clamped */
+        if (y < 5)  y = 5;
+        if (y > 95) y = 95;
+        lv_chart_set_next_value(g_chart, g_ser, y);
+    }
+
+    /* FPS over the last second */
+    uint32_t now = tick_cb();
+    if (now - last_ms >= 1000) {
+        g_fps = g_frames;
+        g_frames = 0;
+        last_ms = now;
+    }
+
+    int tx = -1, ty = -1;
+    bool touched = g_svc->touch_read(&tx, &ty) != 0;
+
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    lv_label_set_text_fmt(g_stats, "%lu FPS   %luKB free",
+                          (unsigned long)g_fps,
+                          (unsigned long)(mon.free_size / 1024));
+
+    /* A dot that follows your finger — the most direct proof touch works. */
+    if (touched) {
+        lv_obj_clear_flag(g_touchdot, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(g_touchdot, tx / TOUCH_DIV - 7, ty / TOUCH_DIV - 7);
+    } else {
+        lv_obj_add_flag(g_touchdot, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* ── Small helper: a rounded "card" panel ────────────────────────────────── */
+static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int w, int h)
+{
+    lv_obj_t *c = lv_obj_create(parent);
+    lv_obj_set_pos(c, x, y);
+    lv_obj_set_size(c, w, h);
+    lv_obj_set_style_bg_color(c, lv_color_hex(COL_PANEL), LV_PART_MAIN);
+    lv_obj_set_style_border_width(c, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(c, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(c, 6, LV_PART_MAIN);
+    lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+    return c;
+}
+
+/* ========================================================================== */
+/*  UI                                                                        */
+/* ========================================================================== */
+static void build_ui(void)
+{
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), LV_PART_MAIN);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* ── Header ──────────────────────────────────────────────────────────── */
+    lv_obj_t *title = lv_label_create(scr);
+    lv_label_set_text(title, "LVGL " LVGL_VERSION_INFO "  ·  PSRAM app");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, lv_color_hex(COL_TEXT), LV_PART_MAIN);
+    lv_obj_set_pos(title, 10, 6);
+
+    g_stats = lv_label_create(scr);
+    lv_label_set_text(g_stats, "-- FPS");
+    lv_obj_set_style_text_color(g_stats, lv_color_hex(COL_ACCENT), LV_PART_MAIN);
+    lv_obj_align(g_stats, LV_ALIGN_TOP_RIGHT, -10, 10);
+
+    /* ── Left card: interactive arc gauge + slider ───────────────────────── */
+    lv_obj_t *left = make_card(scr, 8, 36, 182, 168);
+
+    g_arc = lv_arc_create(left);
+    lv_obj_set_size(g_arc, 108, 108);
+    lv_obj_align(g_arc, LV_ALIGN_TOP_MID, 0, 0);
+    lv_arc_set_rotation(g_arc, 135);
+    lv_arc_set_bg_angles(g_arc, 0, 270);
+    lv_arc_set_range(g_arc, 0, 100);
+    lv_arc_set_value(g_arc, 50);
+    lv_obj_set_style_arc_color(g_arc, lv_color_hex(COL_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(g_arc, 9, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(g_arc, 9, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_arc, lv_color_hex(COL_ACCENT), LV_PART_KNOB);
+    lv_obj_add_event_cb(g_arc, arc_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    g_arc_val = lv_label_create(g_arc);
+    lv_label_set_text(g_arc_val, "50");
+    lv_obj_set_style_text_font(g_arc_val, &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_set_style_text_color(g_arc_val, lv_color_hex(COL_TEXT), LV_PART_MAIN);
+    lv_obj_center(g_arc_val);
+
+    lv_obj_t *sl = lv_slider_create(left);
+    lv_obj_set_size(sl, 150, 10);
+    lv_obj_align(sl, LV_ALIGN_BOTTOM_MID, 0, -4);
+    lv_slider_set_range(sl, 0, 100);
+    lv_slider_set_value(sl, 50, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(sl, lv_color_hex(COL_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(sl, lv_color_hex(COL_ACCENT), LV_PART_KNOB);
+    lv_obj_add_event_cb(sl, slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* ── Right card: live chart + a bar + a switch ───────────────────────── */
+    lv_obj_t *right = make_card(scr, 198, 36, 194, 168);
+
+    g_chart = lv_chart_create(right);
+    lv_obj_set_size(g_chart, 178, 92);
+    lv_obj_align(g_chart, LV_ALIGN_TOP_MID, 0, 0);
+    lv_chart_set_type(g_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(g_chart, 32);
+    lv_chart_set_range(g_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_chart_set_div_line_count(g_chart, 3, 5);
+    lv_obj_set_style_bg_color(g_chart, lv_color_hex(COL_BG), LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_chart, 0, LV_PART_MAIN);
+    lv_obj_set_style_size(g_chart, 0, 0, LV_PART_INDICATOR);   /* hide points */
+    g_ser = lv_chart_add_series(g_chart, lv_color_hex(COL_ACCENT2),
+                                LV_CHART_AXIS_PRIMARY_Y);
+
+    g_bar = lv_bar_create(right);
+    lv_obj_set_size(g_bar, 120, 8);
+    lv_obj_align(g_bar, LV_ALIGN_BOTTOM_LEFT, 2, -6);
+    lv_bar_set_range(g_bar, 0, 100);
+    lv_bar_set_value(g_bar, 50, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(g_bar, lv_color_hex(COL_OK), LV_PART_INDICATOR);
+
+    lv_obj_t *sw = lv_switch_create(right);
+    lv_obj_set_size(sw, 40, 21);
+    lv_obj_align(sw, LV_ALIGN_BOTTOM_RIGHT, -2, -1);
+    lv_obj_add_state(sw, LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(COL_OK), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* ── Footer hint ─────────────────────────────────────────────────────── */
+    lv_obj_t *hint = lv_label_create(scr);
+    lv_label_set_text(hint, "Touch the dial, slider and switch   ·   press X to exit");
+    lv_obj_set_style_text_color(hint, lv_color_hex(COL_MUTED), LV_PART_MAIN);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    /* ── Finger-follow dot (drawn on top, hidden until touched) ──────────── */
+    g_touchdot = lv_obj_create(scr);
+    lv_obj_set_size(g_touchdot, 14, 14);
+    lv_obj_set_style_radius(g_touchdot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_touchdot, lv_color_hex(COL_ACCENT2), LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_touchdot, 0, LV_PART_MAIN);
+    lv_obj_set_style_opa(g_touchdot, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_add_flag(g_touchdot, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(g_touchdot, LV_OBJ_FLAG_CLICKABLE);   /* never steal input */
+}
+
+/* ========================================================================== */
+/*  Entry point                                                               */
+/* ========================================================================== */
+__attribute__((section(".text.entry")))
+int app_entry(const app_services_t *svc)
+{
+    g_svc = svc;
+
+    svc->log_printf("=== LVGL PAPP starting ===\n");
+
+    if (svc->abi_version != PAPP_ABI_VERSION) {
+        svc->log_printf("ABI mismatch: got %lu expected %d\n",
+                        (unsigned long)svc->abi_version, PAPP_ABI_VERSION);
+        return -1;
+    }
+    if (!svc->touch_read) {
+        svc->log_printf("ERROR: launcher has no touch_read service (update it).\n");
+        return -1;
+    }
+
+    /* LVGL renders into this canvas; DMA-capable so the scaler can read it. */
+    g_canvas = (uint16_t *)svc->mem_caps_alloc(CANVAS_BYTES,
+                                               PAPP_MEM_CAP_SPIRAM | PAPP_MEM_CAP_DMA);
+    if (!g_canvas) {
+        svc->log_printf("ERROR: canvas alloc failed (%d bytes)\n", CANVAS_BYTES);
+        return -1;
+    }
+
+    /* ── Bring LVGL up ───────────────────────────────────────────────────── */
+    lv_init();
+    lv_tick_set_cb(tick_cb);               /* do this BEFORE creating timers */
+
+    lv_display_t *disp = lv_display_create(CANVAS_W, CANVAS_H);
+    lv_display_set_flush_cb(disp, disp_flush_cb);
+    lv_display_set_buffers(disp, g_canvas, NULL, CANVAS_BYTES,
+                           LV_DISPLAY_RENDER_MODE_FULL);
+
+    lv_indev_t *indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, touch_read_cb);
+
+    build_ui();
+    lv_timer_create(tick_timer_cb, 100, NULL);
+
+    svc->log_printf("LVGL up: %dx%d canvas, %d KB heap\n",
+                    CANVAS_W, CANVAS_H, (int)(LV_MEM_SIZE / 1024));
+
+    /* ── Main loop ───────────────────────────────────────────────────────── */
+    papp_gamepad_state_t pad;
+    for (;;) {
+        svc->input_gamepad_read(&pad);
+        if (pad.values[PAPP_INPUT_X]) break;      /* physical X = exit */
+
+        uint32_t next = lv_timer_handler();       /* renders + handles input */
+        if (next > 20) next = 20;                 /* stay responsive to X    */
+        svc->delay_ms((int)next ? (int)next : 1);
+    }
+
+    /* ── Tear down ───────────────────────────────────────────────────────── */
+    lv_deinit();
+    svc->mem_free(g_canvas);
+    g_canvas = NULL;
+
+    svc->display_clear(0x0000);
+    svc->display_flush();
+    svc->log_printf("=== LVGL PAPP exit ===\n");
+    return 0;
+}
