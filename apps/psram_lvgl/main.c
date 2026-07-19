@@ -60,19 +60,11 @@ static const app_services_t *g_svc;
 static uint16_t *g_canvas;                 /* LVGL renders here               */
 
 static lv_obj_t *g_arc, *g_arc_val, *g_stats, *g_chart, *g_bar, *g_touchdot;
+static lv_obj_t *g_arc_cap, *g_raw;
 static lv_chart_series_t *g_ser;
 static bool g_feed_chart = true;
+static bool g_have_wheel = false;   /* physical analog wheel present?         */
 static uint32_t g_frames, g_fps;
-
-/* ── Tiny PRNG (no libc rand() in a freestanding build) ──────────────────── */
-static uint32_t g_rng = 0x13579bdfu;
-static uint32_t rnd(void)
-{
-    g_rng ^= g_rng << 13;
-    g_rng ^= g_rng >> 17;
-    g_rng ^= g_rng << 5;
-    return g_rng;
-}
 
 /* ========================================================================== */
 /*  1. DISPLAY  — LVGL renders into g_canvas, we push it to the launcher      */
@@ -125,17 +117,20 @@ static uint32_t tick_cb(void)
 
 /* ── Event handlers ──────────────────────────────────────────────────────── */
 
-/* Slider drives the arc gauge (and its centre label). */
+/* Slider always drives the bar. It only drives the arc when there is no
+ * physical wheel — otherwise the two would fight over the same gauge. */
 static void slider_cb(lv_event_t *e)
 {
     lv_obj_t *sl = lv_event_get_target_obj(e);
     int32_t v = lv_slider_get_value(sl);
-    lv_arc_set_value(g_arc, v);
-    lv_label_set_text_fmt(g_arc_val, "%d", (int)v);
     lv_bar_set_value(g_bar, v, LV_ANIM_ON);
+    if (!g_have_wheel) {
+        lv_arc_set_value(g_arc, v);
+        lv_label_set_text_fmt(g_arc_val, "%d", (int)v);
+    }
 }
 
-/* Dragging the arc directly updates its own label. */
+/* Dragging the arc directly updates its own label (fallback mode only). */
 static void arc_cb(lv_event_t *e)
 {
     lv_obj_t *a = lv_event_get_target_obj(e);
@@ -154,13 +149,29 @@ static void tick_timer_cb(lv_timer_t *t)
 {
     (void)t;
     static uint32_t last_ms;
-    static int32_t  y = 50;
+
+    /* ── Sample the PHYSICAL analog wheel ────────────────────────────────
+     * The paddle potentiometer reports raw 12-bit (0..4095); we scale it to
+     * the arc's 0..100 range, drive the gauge with it, and trace it on the
+     * chart. If the wheel is unavailable (older launcher, or HDMI build) we
+     * fall back to whatever the on-screen arc is set to, so the demo still
+     * works. The switch pauses charting. */
+    int32_t plot;
+    if (g_have_wheel) {
+        int raw = g_svc->paddle_read();
+        if (raw >= 0) {
+            int32_t pct = (int32_t)((raw * 100) / 4095);
+            if (pct < 0)   pct = 0;
+            if (pct > 100) pct = 100;
+            lv_arc_set_value(g_arc, pct);
+            lv_label_set_text_fmt(g_arc_val, "%d", (int)pct);
+            lv_label_set_text_fmt(g_raw, "raw %d", raw);
+        }
+    }
+    plot = lv_arc_get_value(g_arc);
 
     if (g_feed_chart) {
-        y += (int32_t)(rnd() % 21) - 10;          /* random walk, clamped */
-        if (y < 5)  y = 5;
-        if (y > 95) y = 95;
-        lv_chart_set_next_value(g_chart, g_ser, y);
+        lv_chart_set_next_value(g_chart, g_ser, plot);
     }
 
     /* FPS over the last second */
@@ -213,12 +224,17 @@ static void build_ui(void)
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     /* ── Header ──────────────────────────────────────────────────────────── */
+    /* NOTE: keep ALL label text pure ASCII. LVGL's built-in Montserrat fonts
+     * only carry the ASCII range, so anything above 0x7F (a middle dot, an
+     * en-dash, an accented letter) renders as an empty "tofu" box. */
     lv_obj_t *title = lv_label_create(scr);
-    lv_label_set_text(title, "LVGL " LVGL_VERSION_INFO "  ·  PSRAM app");
+    lv_label_set_text(title, "LVGL 9.2");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, LV_PART_MAIN);
     lv_obj_set_style_text_color(title, lv_color_hex(COL_TEXT), LV_PART_MAIN);
-    lv_obj_set_pos(title, 10, 6);
+    lv_obj_set_pos(title, 10, 5);
 
+    /* Right-aligned readout. The title above is deliberately short so these
+     * two never collide on a 400 px-wide canvas. */
     g_stats = lv_label_create(scr);
     lv_label_set_text(g_stats, "-- FPS");
     lv_obj_set_style_text_color(g_stats, lv_color_hex(COL_ACCENT), LV_PART_MAIN);
@@ -245,6 +261,22 @@ static void build_ui(void)
     lv_obj_set_style_text_font(g_arc_val, &lv_font_montserrat_28, LV_PART_MAIN);
     lv_obj_set_style_text_color(g_arc_val, lv_color_hex(COL_TEXT), LV_PART_MAIN);
     lv_obj_center(g_arc_val);
+
+    /* When the physical wheel drives the gauge, take it out of the touch
+     * path entirely so a stray finger cannot fight the potentiometer. */
+    if (g_have_wheel) {
+        lv_obj_remove_flag(g_arc, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    g_arc_cap = lv_label_create(left);
+    lv_label_set_text(g_arc_cap, g_have_wheel ? "PHYSICAL WHEEL" : "DIAL (touch)");
+    lv_obj_set_style_text_color(g_arc_cap, lv_color_hex(COL_MUTED), LV_PART_MAIN);
+    lv_obj_align(g_arc_cap, LV_ALIGN_TOP_MID, 0, 110);
+
+    g_raw = lv_label_create(left);
+    lv_label_set_text(g_raw, g_have_wheel ? "raw --" : "no wheel");
+    lv_obj_set_style_text_color(g_raw, lv_color_hex(COL_ACCENT2), LV_PART_MAIN);
+    lv_obj_align(g_raw, LV_ALIGN_TOP_MID, 0, 126);
 
     lv_obj_t *sl = lv_slider_create(left);
     lv_obj_set_size(sl, 150, 10);
@@ -287,7 +319,9 @@ static void build_ui(void)
 
     /* ── Footer hint ─────────────────────────────────────────────────────── */
     lv_obj_t *hint = lv_label_create(scr);
-    lv_label_set_text(hint, "Touch the dial, slider and switch   ·   press X to exit");
+    lv_label_set_text(hint, g_have_wheel
+                      ? "Turn the wheel - the graph follows it    X = exit"
+                      : "Drag the dial - the graph follows it    X = exit");
     lv_obj_set_style_text_color(hint, lv_color_hex(COL_MUTED), LV_PART_MAIN);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
 
@@ -343,11 +377,32 @@ int app_entry(const app_services_t *svc)
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, touch_read_cb);
 
+    /* Probe the physical analog wheel. paddle_read sits in the ABI's
+     * append-only zone, so an older launcher will not have it at all; and
+     * even a current launcher returns -1 on the HDMI build, where no paddle
+     * is wired. Either way we fall back to the touch-driven dial. */
+    if (svc->paddle_read) {
+        /* Prime it: the first call initialises the ADC, and the reading is
+         * only refreshed inside input_gamepad_read(), so poll once here. */
+        (void)svc->paddle_read();
+        papp_gamepad_state_t warm;
+        svc->input_gamepad_read(&warm);
+        svc->delay_ms(20);
+        svc->input_gamepad_read(&warm);
+        int raw = svc->paddle_read();
+        g_have_wheel = (raw >= 0);
+        svc->log_printf("paddle probe: raw=%d -> wheel %s\n",
+                        raw, g_have_wheel ? "PRESENT" : "absent");
+    } else {
+        svc->log_printf("paddle probe: launcher has no paddle_read service\n");
+    }
+
     build_ui();
     lv_timer_create(tick_timer_cb, 100, NULL);
 
     svc->log_printf("LVGL up: %dx%d canvas, %d KB heap\n",
                     CANVAS_W, CANVAS_H, (int)(LV_MEM_SIZE / 1024));
+    svc->log_printf("BUILD MARKER: v4 chart-follows-physical-wheel\n");
 
     /* ── Main loop ───────────────────────────────────────────────────────── */
     papp_gamepad_state_t pad;

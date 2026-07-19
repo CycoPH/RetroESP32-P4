@@ -168,6 +168,19 @@ typedef struct {
      * (and fills *x,*y), 0 if not. Either pointer may be NULL. */
     int (*touch_read)(int *x, int *y);
 
+    /* ── Analog paddle / wheel (ADC2_CH2, GPIO 51) ───────────────────── */
+    /* Raw 12-bit reading (0..4095) from the physical analog wheel — the
+     * same potentiometer the Atari paddle games use. Returns -1 when it is
+     * unavailable: on the HDMI build (no paddle is wired) or if the ADC
+     * could not be initialised. The ADC is brought up lazily on first call.
+     *
+     * The reading is refreshed by the launcher inside input_gamepad_read(),
+     * so poll that every frame to keep values fresh.
+     *
+     * Appended after touch_read — null-check before calling:
+     *     if (svc->paddle_read) { int raw = svc->paddle_read(); ... } */
+    int (*paddle_read)(void);
+
 } app_services_t;
 
 /* ── Entry Point Signature ───────────────────────────────────────────── */

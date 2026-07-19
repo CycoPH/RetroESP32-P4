@@ -194,6 +194,7 @@ Init once; then submit from your main loop or a dedicated audio task (see §6 fo
 |----------|-----------|---------|
 | `input_gamepad_read` | `void(papp_gamepad_state_t *state)` | Fill `state.values[PAPP_INPUT_*]` (1 = pressed) |
 | `touch_read` | `int(int *x, int *y)` | GT911 touch: returns 1 if touched (fills `*x,*y`), 0 if not. **Null-check first** (see below) |
+| `paddle_read` | `int(void)` | Physical analog wheel (paddle pot): raw 12-bit `0..4095`, or `-1` if unavailable. **Null-check first** |
 
 Buttons: `UP RIGHT DOWN LEFT SELECT START A B X Y L R MENU VOLUME` (prefix `PAPP_INPUT_`). By
 convention **MENU exits** the app.
@@ -216,6 +217,31 @@ This null-check is the rule for **every service appended after v1** — see §7.
 > the top touch strip and VOLUME from the bottom strip** (`odroid_input.c`). So a touch app that quits
 > on `PAPP_INPUT_MENU` will exit the moment the user touches the top of the screen. **Touch apps
 > should exit on a physical button** (e.g. `PAPP_INPUT_X`) instead.
+
+**The analog wheel** (`paddle_read`) is the potentiometer on ADC2_CH2 / GPIO 51 — the same one the
+Atari paddle games use (`components/stella/stella_run.cpp`, `components/atari800/atari800_run.cpp`
+have long driven it directly; `paddle_read` simply exposes it to PAPPs, which previously had no
+analog input at all).
+
+Two things to know:
+
+- **The value only refreshes inside `input_gamepad_read()`.** Calling `paddle_read()` in a tight
+  loop without polling input returns a stale reading. Poll input each frame.
+- **The ADC is brought up lazily on the first call.** `odroid_paddle_adc_init()` is idempotent and
+  *reuses* an existing ADC unit handle, so this never conflicts with the emulator cores.
+
+```c
+if (svc->paddle_read) {
+    papp_gamepad_state_t pad;
+    svc->input_gamepad_read(&pad);        /* refreshes the reading */
+    int raw = svc->paddle_read();         /* 0..4095, or -1 */
+    if (raw >= 0) { int pct = (raw * 100) / 4095; /* ... */ }
+}
+```
+
+Returns `-1` on the **HDMI build** (no paddle is wired) and on older launchers the pointer itself is
+`NULL` — so always provide a fallback path. To tell a real pot from a floating pin, sample a few
+times and check the spread, as the Atari cores do.
 
 ### File I/O
 

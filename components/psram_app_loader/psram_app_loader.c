@@ -359,6 +359,27 @@ static int svc_touch_read(int *x, int *y)
     return 1;
 }
 
+/* Raw 12-bit value from the physical analog wheel (paddle potentiometer on
+ * ADC2_CH2 / GPIO 51), or -1 when unavailable.
+ *
+ * The ADC is initialised lazily here rather than at launcher startup: nothing
+ * else in the firmware calls odroid_paddle_adc_init(), so bringing it up only
+ * when an app actually asks for the wheel keeps boot behaviour unchanged.
+ * odroid_input_gamepad_read() refreshes odroid_paddle_adc_raw once the handle
+ * exists, so apps that poll input each frame get fresh readings.
+ *
+ * On the HDMI build no paddle is wired and the read path is compiled out, so
+ * the value simply stays -1. */
+static int svc_paddle_read(void)
+{
+    static bool inited = false;
+    if (!inited) {
+        odroid_paddle_adc_init();
+        inited = true;
+    }
+    return odroid_paddle_adc_raw;
+}
+
 static void populate_services(app_services_t *svc) {
     memset(svc, 0, sizeof(*svc));
     svc->abi_version = PAPP_ABI_VERSION;
@@ -423,6 +444,7 @@ static void populate_services(app_services_t *svc) {
 
     /* Appended after ABI v1 (backward-compatible, see psram_app.h) */
     svc->touch_read      = svc_touch_read;
+    svc->paddle_read     = svc_paddle_read;
 }
 
 /* ── Loader ──────────────────────────────────────────────────────────── */
