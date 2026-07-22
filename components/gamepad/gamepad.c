@@ -478,6 +478,65 @@ static void usb_lib_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* ========================= Sony DualShock 3 Operational-Mode Enable ========================= */
+
+/**
+ * Genuine Sony DualShock 3 / Sixaxis pads (VID 0x054C, PID 0x0268) do NOT stream
+ * input reports over USB after enumeration. They sit silent with all four red LEDs
+ * blinking until the host issues a HID Feature request to put them into "operational
+ * mode". Clone pads auto-stream (and use a different VID/PID), so this is gated to the
+ * genuine Sony VID/PID and both steps are best-effort (a STALL is non-fatal — input
+ * arrives on the interrupt IN endpoint, not EP0).
+ */
+static void ds3_enable_operational(hid_host_device_handle_t hid_dev)
+{
+    /* Step 1: GET_REPORT (Feature) 0xF2 — reads the controller's Bluetooth MAC and
+     * primes some genuine units to begin reporting. */
+    uint8_t f2[17] = {0};
+    size_t  f2_len = sizeof(f2);
+    esp_err_t err = hid_class_request_get_report(hid_dev, HID_REPORT_TYPE_FEATURE,
+                                                 0xF2, f2, &f2_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS3: GET_REPORT 0xF2 failed: %s (continuing)", esp_err_to_name(err));
+    }
+
+    /* Step 2: SET_REPORT (Feature) 0xF4 = 42 0C 00 00 — enable operational mode. */
+    uint8_t enable[4] = {0x42, 0x0C, 0x00, 0x00};
+    err = hid_class_request_set_report(hid_dev, HID_REPORT_TYPE_FEATURE,
+                                       0xF4, enable, sizeof(enable));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS3: SET_REPORT 0xF4 (enable) failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "DS3: operational-mode enable sent (0xF4 42 0C 00 00)");
+    }
+
+    /* Step 3: SET_REPORT (Output) report 0x01 — the LED/rumble control report.
+     * Assigns player LED 1 and kicks the controller into streaming input reports
+     * WITHOUT needing a manual PS-button press (verified on real hardware — LED1
+     * lights and reports flow immediately). Byte[9] is the LED bitmask (0x02 = LED1);
+     * the four 5-byte blocks that follow are the standard per-LED on/off/duty config.
+     * Best-effort. */
+    uint8_t led[] = {
+        0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x02,   /* byte[9] = LED1 */
+        0xff, 0x27, 0x10, 0x00, 0x32,   /* LED4 config */
+        0xff, 0x27, 0x10, 0x00, 0x32,   /* LED3 config */
+        0xff, 0x27, 0x10, 0x00, 0x32,   /* LED2 config */
+        0xff, 0x27, 0x10, 0x00, 0x32,   /* LED1 config */
+        0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00
+    };
+    err = hid_class_request_set_report(hid_dev, HID_REPORT_TYPE_OUTPUT,
+                                       0x01, led, sizeof(led));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS3: SET_REPORT 0x01 (LED/activate) failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "DS3: LED/activate output report sent (%d bytes)", (int)sizeof(led));
+    }
+}
+
 /* ========================= Gamepad Processing Task ========================= */
 
 static const char *proto_names[] = { "NONE", "KEYBOARD", "MOUSE" };
@@ -550,6 +609,14 @@ static void gamepad_task(void *arg)
                  * Long delay gives power supply time to stabilize. */
                 ESP_LOGI(TAG, "Waiting 1000ms for device to stabilize...");
                 vTaskDelay(pdMS_TO_TICKS(1000));
+
+                /* Genuine Sony DualShock 3 (Sixaxis) won't stream input reports
+                 * until it receives the operational-mode enable. Do this after the
+                 * device has settled but before we begin polling for input. */
+                if (s_vid == 0x054C && s_pid == 0x0268) {
+                    ESP_LOGI(TAG, "DS3 detected (054C:0268) — sending operational-mode enable");
+                    ds3_enable_operational(evt.hid_handle);
+                }
 
                 /* Try to start with retry logic */
                 err = ESP_FAIL;
