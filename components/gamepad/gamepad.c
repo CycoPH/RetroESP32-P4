@@ -55,6 +55,14 @@ static volatile int s_raw_dump_len = 0;
 static uint16_t s_vid = 0;
 static uint16_t s_pid = 0;
 
+/* ========================= DS3 periodic re-activation ========================= */
+/* Handle of a connected DualShock 3 that needs re-activation, or NULL. Set after a
+ * successful start, cleared on disconnect. Only used from gamepad_task (re-send) and
+ * the disconnect callback (clear). */
+static hid_host_device_handle_t s_ds3_handle = NULL;
+/* Set true once any input report has arrived — tells the periodic re-activator to stop. */
+static volatile bool s_stream_active = false;
+
 /* ========================= Event Queue ========================= */
 
 typedef enum {
@@ -198,6 +206,9 @@ static uint32_t parse_ps_buttons(uint8_t hat_btn_byte, uint8_t btn2_byte, uint8_
 static void parse_gamepad_report(const uint8_t *data, int len)
 {
     if (len < 4) return;
+
+    /* A report arrived → the pad is streaming; stop DS3 periodic re-activation. */
+    s_stream_active = true;
 
     /* Log first 16 bytes of raw report at DEBUG level */
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, (len > 16) ? 16 : len, ESP_LOG_DEBUG);
@@ -409,6 +420,9 @@ static void hid_interface_cb(hid_host_device_handle_t hid_dev,
     }
     case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "USB HID device disconnected");
+        /* Stop DS3 re-activation before the handle is closed/freed. */
+        s_ds3_handle = NULL;
+        s_stream_active = false;
         hid_host_device_close(hid_dev);
         /* Clear state */
         xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -488,6 +502,36 @@ static void usb_lib_task(void *arg)
  * genuine Sony VID/PID and both steps are best-effort (a STALL is non-fatal — input
  * arrives on the interrupt IN endpoint, not EP0).
  */
+/* DS3 LED/rumble OUTPUT report (report id 0x01). byte[9] is the LED bitmask
+ * (0x02 = player LED 1); the four 5-byte blocks that follow are the standard
+ * per-LED on/off/duty config. Module-scope (non-const: the HID API takes a
+ * non-const pointer) and only touched from gamepad_task, so no locking needed. */
+static uint8_t s_ds3_led_report[] = {
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x02,   /* byte[9] = LED1 */
+    0xff, 0x27, 0x10, 0x00, 0x32,   /* LED4 config */
+    0xff, 0x27, 0x10, 0x00, 0x32,   /* LED3 config */
+    0xff, 0x27, 0x10, 0x00, 0x32,   /* LED2 config */
+    0xff, 0x27, 0x10, 0x00, 0x32,   /* LED1 config */
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00
+};
+
+/* Re-send the operational enable + LED/activate output report, quietly (no logging).
+ * Used both at connect and periodically until the pad starts streaming — the PS3
+ * console keeps sending the output report, and some genuine DS3 units only keep their
+ * input subsystem awake while these arrive. */
+static void ds3_send_activate(hid_host_device_handle_t hid_dev)
+{
+    uint8_t enable[4] = {0x42, 0x0C, 0x00, 0x00};
+    hid_class_request_set_report(hid_dev, HID_REPORT_TYPE_FEATURE,
+                                 0xF4, enable, sizeof(enable));
+    hid_class_request_set_report(hid_dev, HID_REPORT_TYPE_OUTPUT,
+                                 0x01, s_ds3_led_report, sizeof(s_ds3_led_report));
+}
+
 static void ds3_enable_operational(hid_host_device_handle_t hid_dev)
 {
     /* Step 1: GET_REPORT (Feature) 0xF2 — reads the controller's Bluetooth MAC and
@@ -510,30 +554,15 @@ static void ds3_enable_operational(hid_host_device_handle_t hid_dev)
         ESP_LOGI(TAG, "DS3: operational-mode enable sent (0xF4 42 0C 00 00)");
     }
 
-    /* Step 3: SET_REPORT (Output) report 0x01 — the LED/rumble control report.
-     * Assigns player LED 1 and kicks the controller into streaming input reports
-     * WITHOUT needing a manual PS-button press (verified on real hardware — LED1
-     * lights and reports flow immediately). Byte[9] is the LED bitmask (0x02 = LED1);
-     * the four 5-byte blocks that follow are the standard per-LED on/off/duty config.
-     * Best-effort. */
-    uint8_t led[] = {
-        0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x02,   /* byte[9] = LED1 */
-        0xff, 0x27, 0x10, 0x00, 0x32,   /* LED4 config */
-        0xff, 0x27, 0x10, 0x00, 0x32,   /* LED3 config */
-        0xff, 0x27, 0x10, 0x00, 0x32,   /* LED2 config */
-        0xff, 0x27, 0x10, 0x00, 0x32,   /* LED1 config */
-        0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00
-    };
+    /* Step 3: SET_REPORT (Output) report 0x01 — LED/rumble control report.
+     * Assigns player LED 1 and, on many units, kicks input streaming. Best-effort. */
     err = hid_class_request_set_report(hid_dev, HID_REPORT_TYPE_OUTPUT,
-                                       0x01, led, sizeof(led));
+                                       0x01, s_ds3_led_report, sizeof(s_ds3_led_report));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS3: SET_REPORT 0x01 (LED/activate) failed: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "DS3: LED/activate output report sent (%d bytes)", (int)sizeof(led));
+        ESP_LOGI(TAG, "DS3: LED/activate output report sent (%d bytes)",
+                 (int)sizeof(s_ds3_led_report));
     }
 }
 
@@ -560,6 +589,23 @@ static void gamepad_task(void *arg)
             s_raw_dump_count++;
             ESP_LOGI(TAG, "Raw report (%d bytes):", s_raw_dump_len);
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, s_raw_dump_buf, s_raw_dump_len, ESP_LOG_INFO);
+        }
+
+        /* DS3 periodic re-activation: some genuine DS3 units keep their input
+         * subsystem asleep until the LED/rumble OUTPUT report keeps arriving (as the
+         * PS3 console does). Re-send ~once/second while a DS3 is connected but not yet
+         * streaming, for a bounded window. Loop period is ~50ms → 20 ticks ≈ 1s. */
+        if (s_ds3_handle && !s_stream_active) {
+            static int ds3_tick = 0;
+            static int ds3_attempts = 0;
+            if (++ds3_tick >= 20) {
+                ds3_tick = 0;
+                if (ds3_attempts < 30) {   /* ~30s of retries, then give up */
+                    ds3_attempts++;
+                    ds3_send_activate(s_ds3_handle);
+                    ESP_LOGI(TAG, "DS3: re-activation attempt %d", ds3_attempts);
+                }
+            }
         }
 
         if (xQueueReceive(s_event_queue, &evt, pdMS_TO_TICKS(50))) {
@@ -610,14 +656,6 @@ static void gamepad_task(void *arg)
                 ESP_LOGI(TAG, "Waiting 1000ms for device to stabilize...");
                 vTaskDelay(pdMS_TO_TICKS(1000));
 
-                /* Genuine Sony DualShock 3 (Sixaxis) won't stream input reports
-                 * until it receives the operational-mode enable. Do this after the
-                 * device has settled but before we begin polling for input. */
-                if (s_vid == 0x054C && s_pid == 0x0268) {
-                    ESP_LOGI(TAG, "DS3 detected (054C:0268) — sending operational-mode enable");
-                    ds3_enable_operational(evt.hid_handle);
-                }
-
                 /* Try to start with retry logic */
                 err = ESP_FAIL;
                 for (int attempt = 0; attempt < 3; attempt++) {
@@ -634,6 +672,20 @@ static void gamepad_task(void *arg)
                     ESP_LOGE(TAG, "hid_host_device_start giving up after 3 attempts");
                     hid_host_device_close(evt.hid_handle);
                     continue;
+                }
+
+                /* Genuine Sony DualShock 3 (Sixaxis) won't stream input reports until
+                 * it receives the operational-mode enable + LED/activate report.
+                 * Send it AFTER device_start so the host is already polling the
+                 * interrupt-IN endpoint when the pad begins streaming — otherwise the
+                 * first reports are fired before we're listening, dropped, and the pad
+                 * sits idle until a button press re-triggers it. */
+                if (s_vid == 0x054C && s_pid == 0x0268) {
+                    ESP_LOGI(TAG, "DS3 detected (054C:0268) — sending operational-mode enable");
+                    ds3_enable_operational(evt.hid_handle);
+                    /* Arm periodic re-activation until the pad actually streams. */
+                    s_stream_active = false;
+                    s_ds3_handle = evt.hid_handle;
                 }
 
                 /* Mark connected for gamepad devices */
@@ -663,6 +715,8 @@ esp_err_t gamepad_init(const gamepad_config_t *config)
     s_format_log_pending = 0;
     s_raw_dump_count = 0;
     s_raw_dump_len = 0;
+    s_ds3_handle = NULL;
+    s_stream_active = false;
 
     s_mutex = xSemaphoreCreateMutex();
     if (!s_mutex) return ESP_ERR_NO_MEM;
